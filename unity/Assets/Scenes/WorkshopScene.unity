@@ -16161,6 +16161,7 @@ GameObject:
   m_Component:
   - component: {fileID: 320328463}
   - component: {fileID: 320328464}
+  - component: {fileID: 320328466}
   - component: {fileID: 320328465}
   m_Layer: 0
   m_Name: TwistTeleop
@@ -18505,3 +18506,21 @@ SceneRoots:
   - {fileID: 615282063}
   - {fileID: 1418817750}
   - {fileID: 204646041}
+--- !u!114 &320328466
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1794538037}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: b6aba5c2c1774a2e9ea688e8e94e941d, type: 3}
+  m_Name:
+  m_EditorClassIdentifier: Assembly-CSharp::ControllerPosePublisher
+  rightController: {fileID: 1266845203}
+  robotBase: {fileID: 1515122288}
+  legacyPublisher: {fileID: 320328464}
+  poseMode: 0
+  publishHz: 30
+  frameId: vr_robot_base

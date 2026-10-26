@@ -24,6 +24,7 @@ public class ControllerTwistPublisher : MonoBehaviour
     [Header("Mode")]
     [Tooltip("Simulation: publish controller rotation as angular velocity for MoveIt Servo. Real robot: keep linear-only teleop (angular is zeroed on ROS side too).")]
     public bool publishAngularVelocity = true;
+    [HideInInspector] public bool poseInputMode;
     [Tooltip("Per-axis sign correction in ROS base_link (FLU) after Unity conversion. Use +/-1 to flip roll/pitch/yaw if a rotation feels inverted.")]
     public Vector3 angularRosSigns = Vector3.one;
     [Header("Robotiq Gripper")]
@@ -100,6 +101,14 @@ public class ControllerTwistPublisher : MonoBehaviour
     {
         PublishGripperCommandIfChanged();
         UpdateGripperVisual();
+
+        if (poseInputMode)
+        {
+            if (wasTriggerPressed) PublishZeroTwist();
+            wasTriggerPressed = false;
+            hasNeutralPose = false;
+            return;
+        }
 
         if (rightController == null || publishInterval <= 0f || Time.time < nextPublishTime)
         {

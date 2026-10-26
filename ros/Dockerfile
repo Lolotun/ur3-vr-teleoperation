@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     python3-colcon-common-extensions \
     python3-yaml \
+    python3-pip \
     ros-humble-geometry-msgs \
     ros-humble-moveit-servo \
     ros-humble-moveit-kinematics \
@@ -21,6 +22,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-humble-ur-robot-driver \
     ros-humble-xacro \
     && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /tmp/teleop-requirements.txt
+RUN pip3 install --no-cache-dir -r /tmp/teleop-requirements.txt
 
 # Revision read from the last working local workshop image.
 ARG ROS_TCP_ENDPOINT_REV=05a3b25a11d9639549ae128e471bd696430b91f7

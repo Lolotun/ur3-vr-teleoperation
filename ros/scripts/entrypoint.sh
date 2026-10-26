@@ -15,6 +15,26 @@ case "${1:-wifi_speedl}" in
       joint_states_topic:=${JOINT_STATES_TOPIC:-/joint_states} \
       trajectory_topic:=${SERVO_TRAJECTORY_TOPIC:-/team_1/servo_joint_trajectory}
     ;;
+  rtde_real)
+    exec ros2 launch teleop_core rtde_real.launch.py \
+      robot_ip:=${ROBOT_IP:?Set ROBOT_IP} \
+      tcp_port:=${ROS_TCP_PORT:-10000} \
+      enable_motion:=${RTDE_ENABLE_MOTION:-false} \
+      enable_gripper:=${RTDE_ENABLE_GRIPPER:-false} \
+      gripper_port:=${GRIPPER_PORT:-63352} \
+      gripper_force:=${GRIPPER_FORCE:-20} \
+      frequency:=${RTDE_FREQUENCY:-125.0} \
+      position_scale:=${RTDE_POSITION_SCALE:-1.0} \
+      mapping_yaw_deg:=${RTDE_MAPPING_YAW_DEG:-180.0} \
+      max_displacement:=${RTDE_MAX_DISPLACEMENT:-0.25} \
+      max_rotation:=${RTDE_MAX_ROTATION:-1.0} \
+      max_linear_speed:=${RTDE_MAX_LINEAR_SPEED:-0.020} \
+      max_angular_speed:=${RTDE_MAX_ANGULAR_SPEED:-0.12} \
+      command_timeout:=${RTDE_COMMAND_TIMEOUT:-0.25} \
+      feedback_timeout:=${RTDE_FEEDBACK_TIMEOUT:-0.25} \
+      lookahead_time:=${RTDE_LOOKAHEAD_TIME:-0.1} \
+      gain:=${RTDE_GAIN:-300.0}
+    ;;
   wifi_speedl)
     exec ros2 launch teleop_core wifi_speedl.launch.py \
       robot_ip:=${ROBOT_IP:?Set ROBOT_IP to the UR controller IP address} \
@@ -46,5 +66,5 @@ case "${1:-wifi_speedl}" in
       twist_command_safe_topic:=${TWIST_COMMAND_SAFE_TOPIC:-/team_1/twist_command_safe}
     ;;
   bash) exec /bin/bash ;;
-  *) echo "Usage: entrypoint.sh [servo_sim|wifi_speedl|bash]" >&2; exit 1 ;;
+  *) echo "Usage: entrypoint.sh [servo_sim|wifi_speedl|rtde_real|bash]" >&2; exit 1 ;;
 esac
