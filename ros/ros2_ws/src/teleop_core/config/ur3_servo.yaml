@@ -1,0 +1,48 @@
+moveit_servo:
+  use_gazebo: false
+  status_topic: /team_1/servo_status
+
+  command_in_type: speed_units
+  cartesian_command_in_topic: /team_1/twist_command_safe
+  joint_command_in_topic: /team_1/joint_jog_command
+  pose_command_in_topic: /team_1/pose_command
+
+  scale:
+    linear: 0.12
+    rotational: 0.0
+    joint: 0.4
+
+  publish_period: 0.02
+  incoming_command_timeout: 0.15
+  num_outgoing_halt_msgs_to_publish: 4
+
+  command_out_type: trajectory_msgs/JointTrajectory
+  command_out_topic: /team_1/servo_joint_trajectory
+  publish_joint_positions: true
+  publish_joint_velocities: true
+  publish_joint_accelerations: false
+
+  smoothing_filter_plugin_name: online_signal_smoothing::ButterworthFilterPlugin
+
+  move_group_name: manipulator
+  planning_frame: base_link
+  ee_frame_name: tool0
+  robot_link_command_frame: base_link
+
+  joint_topic: /joint_states
+  low_pass_filter_coeff: 5.0
+
+  lower_singularity_threshold: 10.0
+  hard_stop_singularity_threshold: 30.0
+  leaving_singularity_threshold_multiplier: 2.0
+  singularity_step_scale: 0.01
+  joint_limit_margins: [0.1]
+  override_velocity_scaling_factor: 0.0
+
+  check_collisions: false
+  collision_check_rate: 5.0
+  self_collision_proximity_threshold: 0.01
+  scene_collision_proximity_threshold: 0.02
+
+  halt_all_joints_in_cartesian_mode: true
+  halt_all_joints_in_joint_mode: true

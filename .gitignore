@@ -1,0 +1,28 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.keystore
+*.pem
+
+# Python and ROS build products
+__pycache__/
+*.py[cod]
+.venv/
+**/ros2_ws/build/
+**/ros2_ws/install/
+**/ros2_ws/log/
+*.egg-info/
+
+# Unity has its own ignore file, retained in unity/.gitignore
+*.slnx
+
+# Generated artifacts belong outside source control
+/dist/
+/data/
+/recordings/
+*.docker.tar
+*.docker.tar.gz
+*.apk
+*.aab
+.DS_Store
