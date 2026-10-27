@@ -20,6 +20,7 @@ case "${1:-wifi_speedl}" in
       robot_ip:=${ROBOT_IP:?Set ROBOT_IP} \
       tcp_port:=${ROS_TCP_PORT:-10000} \
       enable_motion:=${RTDE_ENABLE_MOTION:-false} \
+      pose_check_mode:=${RTDE_POSE_CHECK_MODE:-robot} \
       enable_gripper:=${RTDE_ENABLE_GRIPPER:-false} \
       gripper_port:=${GRIPPER_PORT:-63352} \
       gripper_force:=${GRIPPER_FORCE:-20} \

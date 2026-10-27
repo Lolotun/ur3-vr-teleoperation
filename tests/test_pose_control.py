@@ -87,4 +87,59 @@ class PoseTests(unittest.TestCase):
         self.assertEqual(control.stops,1)
 
 
+class LocalPoseCheckTests(unittest.TestCase):
+    def setUp(self):
+        self.actual=Pose((.4,0.,.3),(0.,0.,0.,1.))
+        self.control=Control()
+        def forbid_remote_check(p):
+            raise AssertionError('Local mode must not query remote pose check')
+        self.control.isPoseWithinSafetyLimits=forbid_remote_check
+        self.session=ServoSession(self.control,pose_check_mode='local')
+
+    def test_local_commands_are_bounded_without_remote_queries(self):
+        target=Pose((.5,0.,.3),from_rotvec((0.,0.,.3)))
+        for _ in range(20):
+            previous=self.session.command or self.actual
+            command=self.session.step(self.actual,target,.008)
+            d,a=distance(previous,command)
+            self.assertLessEqual(d,.02*.008+1e-10)
+            self.assertLessEqual(a,.12*.008+1e-10)
+        self.assertEqual(len(self.control.sent),20)
+        self.assertIn('local_pose_check',self.session.timings)
+
+    def test_outside_envelope_stops_before_sending(self):
+        for target in (Pose((.7,0.,.3),self.actual.q),
+                       Pose(self.actual.p,from_rotvec((0.,0.,1.1)))):
+            self.session.step(self.actual,self.actual,.008)
+            count=len(self.control.sent)
+            with self.assertRaises(RuntimeError): self.session.step(self.actual,target,.008)
+            self.assertEqual(len(self.control.sent),count)
+            self.assertIsNone(self.session.command)
+            self.assertIsNone(self.session.anchor)
+        self.assertEqual(self.control.stops,2)
+
+    def test_envelope_anchor_does_not_follow_actual_pose(self):
+        self.session.step(self.actual,self.actual,.008)
+        moved=Pose((.6,0.,.3),self.actual.q)
+        target=Pose((.7,0.,.3),self.actual.q)
+        with self.assertRaises(RuntimeError): self.session.step(moved,target,.008)
+
+    def test_stop_allows_new_anchor(self):
+        self.session.step(self.actual,self.actual,.008)
+        self.session.stop()
+        moved=Pose((.7,0.,.3),self.actual.q)
+        self.assertEqual(self.session.step(moved,moved,.008),moved)
+
+    def test_invalid_period_stops(self):
+        for dt in (0.,-1.,float('nan'),float('inf')):
+            self.session.step(self.actual,self.actual,.008)
+            count=len(self.control.sent)
+            with self.assertRaises(RuntimeError): self.session.step(self.actual,self.actual,dt)
+            self.assertEqual(len(self.control.sent),count)
+            self.assertIsNone(self.session.command)
+
+    def test_unknown_mode_is_rejected(self):
+        with self.assertRaises(ValueError): ServoSession(self.control,pose_check_mode='off')
+
+
 if __name__=='__main__': unittest.main()

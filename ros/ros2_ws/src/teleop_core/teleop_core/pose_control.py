@@ -114,12 +114,22 @@ class RelativeController:
 
 class ServoSession:
     """One owner of control calls; preview never owns a ControlInterface."""
-    def __init__(self, control, linear_speed=.02, angular_speed=.12, lookahead=.1, gain=300.):
+    def __init__(self, control, linear_speed=.02, angular_speed=.12, lookahead=.1, gain=300.,
+                 pose_check_mode='robot', max_displacement=.25, max_rotation=1.):
+        if pose_check_mode not in ('robot','local'):
+            raise ValueError('pose_check_mode must be robot or local')
+        for value in (linear_speed,angular_speed,max_displacement,max_rotation):
+            if not math.isfinite(value) or value<=0:
+                raise ValueError('Servo limits must be finite and positive')
         self.control=control; self.linear_speed=linear_speed; self.angular_speed=angular_speed
         self.lookahead=lookahead; self.gain=gain; self.command=None
+        self.pose_check_mode=pose_check_mode
+        self.max_displacement=max_displacement;self.max_rotation=max_rotation
+        self.anchor=None
         self.timings={}
 
     def stop(self):
+        self.anchor=None
         if self.command is not None:
             self.command=None
             if self.control is not None: self.control.servoStop()
@@ -129,16 +139,35 @@ class ServoSession:
         if target is None:
             self.stop(); return None
         if self.control is None: return target
+        if not math.isfinite(dt) or dt<=0:
+            self.stop();raise RuntimeError('Invalid servo period')
         current=self.command or actual
         command=bounded_step(current,target,self.linear_speed*dt,self.angular_speed*dt)
         values=command.ur()
         started=time.monotonic()
-        safe=self.control.isPoseWithinSafetyLimits(values)
-        self.timings['isPoseWithinSafetyLimits']=time.monotonic()-started
+        if self.pose_check_mode=='robot':
+            safe=self.control.isPoseWithinSafetyLimits(values)
+            self.timings['isPoseWithinSafetyLimits']=time.monotonic()-started
+        else:
+            # Cartesian guard only: no IK, collision model or UR safety-plane checks.
+            # Reconstruct poses to reject malformed/non-finite values at this boundary.
+            try:
+                actual=Pose(actual.p,actual.q);target=Pose(target.p,target.q)
+                command=Pose(command.p,command.q)
+                anchor=self.anchor or actual
+                displacement,rotation=distance(anchor,target)
+                step,turn=distance(current,command)
+                safe=(displacement<=self.max_displacement and rotation<=self.max_rotation
+                      and step<=self.linear_speed*dt+1e-10
+                      and turn<=self.angular_speed*dt+1e-10)
+            except ValueError:
+                safe=False
+            self.timings['local_pose_check']=time.monotonic()-started
         if not safe:
-            self.stop(); raise RuntimeError('Target outside robot safety limits')
+            self.stop(); raise RuntimeError(f'Target rejected by {self.pose_check_mode} pose check')
         # Mark before the call so shutdown also stops a command whose acknowledgement fails.
         self.command=command
+        if self.anchor is None: self.anchor=actual
         started=time.monotonic()
         accepted=self.control.servoL(values,0.,0.,dt,self.lookahead,self.gain)
         self.timings['servoL']=time.monotonic()-started

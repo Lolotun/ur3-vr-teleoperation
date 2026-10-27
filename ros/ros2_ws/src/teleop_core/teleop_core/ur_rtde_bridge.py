@@ -18,14 +18,18 @@ class UrRtdeBridge(Node):
         defaults={'robot_ip':'','enable_motion':False,'frequency':125.,'command_timeout':.25,
                   'feedback_timeout':.25,'max_linear_speed':.02,'max_angular_speed':.12,
                   'max_tracking_error':.05,'max_angular_tracking_error':.35,
-                  'lookahead_time':.1,'gain':300.,'robot_frame':'base'}
+                  'lookahead_time':.1,'gain':300.,'robot_frame':'base',
+                  'pose_check_mode':'robot','max_displacement':.25,'max_rotation':1.}
         for k,v in defaults.items(): self.declare_parameter(k,v)
         self.cfg={k:self.get_parameter(k).value for k in defaults}
         if not self.cfg['robot_ip']: raise ValueError('robot_ip required')
         for k in ['frequency','command_timeout','feedback_timeout','max_linear_speed',
-                  'max_angular_speed','max_tracking_error','max_angular_tracking_error']:
+                  'max_angular_speed','max_tracking_error','max_angular_tracking_error',
+                  'max_displacement','max_rotation']:
             if not math.isfinite(self.cfg[k]) or self.cfg[k]<=0: raise ValueError(k)
         if not 1<=self.cfg['frequency']<=500: raise ValueError('frequency outside 1..500')
+        if self.cfg['pose_check_mode'] not in ('robot','local'):
+            raise ValueError('pose_check_mode must be robot or local')
         if not .03<=self.cfg['lookahead_time']<=.2 or not 100<=self.cfg['gain']<=2000:
             raise ValueError('Invalid servo tuning')
         self.lock=threading.Lock();self.stopping=threading.Event()
@@ -83,12 +87,17 @@ class UrRtdeBridge(Node):
                 from rtde_control import RTDEControlInterface
                 control=RTDEControlInterface(self.cfg['robot_ip'],self.cfg['frequency'])
             session=ServoSession(control,self.cfg['max_linear_speed'],self.cfg['max_angular_speed'],
-                                 self.cfg['lookahead_time'],self.cfg['gain'])
+                                 self.cfg['lookahead_time'],self.cfg['gain'],
+                                 self.cfg['pose_check_mode'],self.cfg['max_displacement'],self.cfg['max_rotation'])
             dt=1/self.cfg['frequency'];last_stamp=None;last_fresh=time.monotonic();last_cycle=None
+            missed_cycle_limit=4*dt
             previous_timings={}
             self.get_logger().info(
                 f'RTDE timing diagnostics: frequency={self.cfg["frequency"]:.1f}Hz, '
-                f'period={dt*1000:.1f}ms, missed-cycle threshold={10*dt*1000:.1f}ms')
+                f'period={dt*1000:.1f}ms, missed-cycle threshold={missed_cycle_limit*1000:.1f}ms; '
+                f'pose_check_mode={self.cfg["pose_check_mode"]}')
+            if self.cfg['pose_check_mode']=='local':
+                self.get_logger().warning('Local Cartesian pose guard: no IK, collision or UR safety-plane validation')
             while not self.stopping.is_set():
                 cycle=time.monotonic()
                 timings={}
@@ -120,14 +129,14 @@ class UrRtdeBridge(Node):
                        (target is not None and age>self.cfg['command_timeout'])):
                     session.stop();self.trip('STALE_COMMAND_RELEASE_TO_REARM');target=None
                 elif not active: target=None
-                if control and target is not None and last_cycle is not None and cycle-last_cycle>4*dt:
+                if control and target is not None and last_cycle is not None and cycle-last_cycle>missed_cycle_limit:
                     elapsed=cycle-last_cycle
                     session.stop();self.trip('MISSED_CONTROL_PERIOD_RELEASE_TO_REARM');target=None
                     details=', '.join(f'{k}={v*1000:.2f}ms' for k,v in previous_timings.items())
                     current=', '.join(f'{k}={v*1000:.2f}ms' for k,v in timings.items())
                     self.get_logger().error(
                         f'RTDE missed cycle: interval={elapsed*1000:.2f}ms, '
-                        f'limit={10*dt*1000:.2f}ms; previous cycle: {details}; '
+                        f'limit={missed_cycle_limit*1000:.2f}ms; previous cycle: {details}; '
                         f'current cycle before stop: {current}; '
                         f'target_age={age*1000:.2f}ms, heartbeat_age={heartbeat_age*1000:.2f}ms')
                 if session.command is not None:
