@@ -65,6 +65,26 @@ External Control Play для этого режима не требуется.
 для Editor на том же компьютере IP `127.0.0.1`, для Quest — доступный по Wi-Fi IP компьютера.
 При ошибке Meta XR на Linux см. [инструкцию восстановления прежнего исправления](docs/setup.md#unity).
 
+### Meta XR SDK на Linux
+
+Meta XR Core SDK **85.0.0** загружается Unity Package Manager; полная копия SDK
+не хранится в Git. В этой версии на Linux возможна ошибка компиляции:
+
+```text
+Installer.cs: error CS0103: The name 'downloadedInstallerPath' does not exist in the current context
+```
+
+После загрузки пакетов выполнить из корня репозитория:
+
+```bash
+python3 scripts/patch-meta-xr.py
+```
+
+Скрипт локально исключает загрузчик установщика Meta XR Simulator на Linux,
+сохраняя поведение Windows/macOS. Вернуться в Unity и дождаться перекомпиляции.
+Повторный запуск безопасен; после удаления `unity/Library` или повторной загрузки
+SDK исправление нужно применить снова. RTDE, сцена и APK от этой правки не меняются.
+
 Остановка:
 
 ```bash

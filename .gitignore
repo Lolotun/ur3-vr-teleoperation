@@ -17,6 +17,10 @@ __pycache__/
 # Unity has its own ignore file, retained in unity/.gitignore
 *.slnx
 
+# Meta SDK is resolved from the registry; local embedded copies stay untracked.
+/unity/Packages/com.meta.xr.sdk.core/
+/unity/Packages/com.meta.xr.sdk.core.meta
+
 # Generated artifacts belong outside source control
 /dist/
 /data/

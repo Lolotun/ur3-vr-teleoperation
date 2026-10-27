@@ -3,6 +3,7 @@ import sys
 import types
 import time
 import unittest
+import json
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'ros/ros2_ws/src/teleop_core'))
 
@@ -38,7 +39,7 @@ sys.modules['rtde_receive']=types.SimpleNamespace(RTDEReceiveInterface=Receive)
 sys.modules['rtde_control']=types.SimpleNamespace(RTDEControlInterface=Control)
 import rclpy
 from rclpy.executors import SingleThreadedExecutor
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from geometry_msgs.msg import PoseStamped
 from teleop_core.relative_pose_controller import RelativePoseController
 from teleop_core.ur_rtde_bridge import UrRtdeBridge
@@ -53,6 +54,15 @@ class Integration(unittest.TestCase):
         for n in [bridge,relative,source]: executor.add_node(n)
         poses=source.create_publisher(PoseStamped,'/vr/right_hand/pose',1)
         active=source.create_publisher(Bool,'/vr/right_hand/active',1)
+        clock_pong=source.create_publisher(String,'/vr/clock_pong',1)
+        client_offset=113_000_000
+        def on_ping(msg):
+            reply=json.loads(msg.data)
+            reply['received_ns']=source.get_clock().now().nanoseconds+client_offset
+            reply['replied_ns']=source.get_clock().now().nanoseconds+client_offset
+            reply['session']='fake-quest'
+            clock_pong.publish(String(data=json.dumps(reply)))
+        source.create_subscription(String,'/teleop/clock_ping',on_ping,1)
         targets=[];source.create_subscription(PoseStamped,'/teleop/target_pose',targets.append,1)
         def pump(seconds,held=False,x=0.,send_pose=True):
             end=time.monotonic()+seconds;next_send=0.
@@ -62,11 +72,13 @@ class Integration(unittest.TestCase):
                     active.publish(Bool(data=held))
                     if send_pose:
                         msg=PoseStamped();msg.header.frame_id='vr_robot_base'
-                        msg.header.stamp=source.get_clock().now().to_msg()
+                        ns=source.get_clock().now().nanoseconds+client_offset
+                        msg.header.stamp.sec=ns//10**9;msg.header.stamp.nanosec=ns%10**9
                         msg.pose.orientation.w=1.;msg.pose.position.x=x;poses.publish(msg)
                 executor.spin_once(timeout_sec=.005)
         try:
-            pump(.4);pump(.25,True);pump(.5,True,.02)
+            pump(2.);pump(.25,True);pump(.5,True,.02)
+            self.assertIsNotNone(relative.clock_sync.estimate(time.monotonic()))
             self.assertTrue(targets)
             self.assertAlmostEqual(targets[-1].pose.position.x,.38,places=4)
             if motion:

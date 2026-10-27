@@ -1963,15 +1963,15 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 204646035}
   serializedVersion: 2
-  m_LocalRotation: {x: -0, y: 0.64970344, z: -0, w: 0.76018786}
-  m_LocalPosition: {x: -0.57301164, y: 0.762, z: 1.9734808}
+  m_LocalRotation: {x: 0, y: -0.7071068, z: 0, w: 0.7071068}
+  m_LocalPosition: {x: 0.7, y: 0.762, z: 1.9734808}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children:
   - {fileID: 1481112757}
   - {fileID: 1977047544}
   m_Father: {fileID: 0}
-  m_LocalEulerAnglesHint: {x: 0, y: 81.038, z: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: -90, z: 0}
 --- !u!114 &204646042
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -2653,6 +2653,21 @@ MonoBehaviour:
   poseMode: 1
   publishHz: 30
   frameId: vr_robot_base
+--- !u!114 &320328467
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1794538037}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: e8f3750736814918822a3e00542af1e9, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::WorkshopViewCalibration
+  posePublisher: {fileID: 320328466}
+  distanceToRobot: 1.5
+  sceneForward: {x: 0, y: 0, z: 1}
 --- !u!1 &322553522
 GameObject:
   m_ObjectHideFlags: 8
@@ -16182,6 +16197,7 @@ GameObject:
   - component: {fileID: 320328464}
   - component: {fileID: 320328466}
   - component: {fileID: 320328465}
+  - component: {fileID: 320328467}
   m_Layer: 0
   m_Name: TwistTeleop
   m_TagString: Untagged

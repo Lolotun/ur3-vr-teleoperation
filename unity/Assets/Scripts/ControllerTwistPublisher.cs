@@ -57,6 +57,15 @@ public class ControllerTwistPublisher : MonoBehaviour
     private bool hasNeutralPose;
     private Vector3 neutralControllerPosition;
     private Quaternion neutralControllerRotation;
+    private bool calibrationBlocked;
+
+    public void SetCalibrationBlocked(bool blocked)
+    {
+        calibrationBlocked = blocked;
+        if (ros != null && twistMsg != null) PublishZeroTwist();
+        wasTriggerPressed = false;
+        hasNeutralPose = false;
+    }
 
     private void Start()
     {
@@ -99,6 +108,7 @@ public class ControllerTwistPublisher : MonoBehaviour
 
     private void Update()
     {
+        if (calibrationBlocked) return;
         PublishGripperCommandIfChanged();
         UpdateGripperVisual();
 

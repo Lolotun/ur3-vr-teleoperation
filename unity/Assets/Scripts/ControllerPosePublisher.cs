@@ -22,12 +22,59 @@ public class ControllerPosePublisher : MonoBehaviour
     private bool released;
     private bool restoreGripper;
     private bool configured;
+    private bool calibrationBlocked;
+    private readonly string clockSession = System.Guid.NewGuid().ToString("N");
+
+    [System.Serializable]
+    private class ClockExchange
+    {
+        public string id;
+        public long sent_ns;
+        public long received_ns;
+        public long replied_ns;
+        public string session;
+    }
+
+    private static long UtcNanoseconds()
+    {
+        return (System.DateTime.UtcNow.Ticks - 621355968000000000L) * 100L;
+    }
+
+    private void OnClockPing(StringMsg ping)
+    {
+        long received = UtcNanoseconds();
+        if (!isActiveAndEnabled) return;
+        try
+        {
+            var reply = JsonUtility.FromJson<ClockExchange>(ping.data);
+            if (reply == null || string.IsNullOrEmpty(reply.id) || reply.sent_ns <= 0) return;
+            reply.received_ns = received;
+            reply.session = clockSession;
+            reply.replied_ns = UtcNanoseconds();
+            ros.Publish("/vr/clock_pong", new StringMsg(JsonUtility.ToJson(reply)));
+        }
+        catch (System.ArgumentException exception)
+        {
+            Debug.LogWarning("[Clock sync] Invalid ping: " + exception.Message, this);
+        }
+    }
+
+    public void SetCalibrationBlocked(bool blocked)
+    {
+        calibrationBlocked = blocked;
+        released = false;
+        nextPublish = 0f;
+        if (ros != null) ros.Publish("/vr/right_hand/active", new BoolMsg(false));
+        if (legacyPublisher != null) legacyPublisher.SetCalibrationBlocked(blocked);
+    }
 
     private void Start()
     {
         ros = ROSConnection.GetOrCreateInstance();
         ros.RegisterPublisher<PoseStampedMsg>("/vr/right_hand/pose");
         ros.RegisterPublisher<BoolMsg>("/vr/right_hand/active");
+        ros.RegisterPublisher<StringMsg>("/vr/clock_pong");
+        ros.Subscribe<StringMsg>("/teleop/clock_ping", OnClockPing);
         if (legacyPublisher == null) legacyPublisher = GetComponent<ControllerTwistPublisher>();
         if (legacyPublisher != null) restoreGripper = legacyPublisher.publishGripperCommands;
         ApplyMode();
@@ -53,6 +100,12 @@ public class ControllerPosePublisher : MonoBehaviour
         if (poseMode != lastMode) ApplyMode();
         if (!poseMode || Time.unscaledTime < nextPublish) return;
         nextPublish = Time.unscaledTime + 1f / Mathf.Max(1f, publishHz);
+        if (calibrationBlocked)
+        {
+            released = false;
+            ros.Publish("/vr/right_hand/active", new BoolMsg(false));
+            return;
+        }
         hand = InputDevices.GetDeviceAtXRNode(XRNode.RightHand);
         bool valid = hand.isValid && hand.TryGetFeatureValue(CommonUsages.isTracked, out bool tracked) && tracked
             && rightController != null && robotBase != null;
@@ -66,12 +119,11 @@ public class ControllerPosePublisher : MonoBehaviour
         else if (!pressed) released = true;
         ros.Publish("/vr/right_hand/active", new BoolMsg(valid && pressed && released));
         if (!valid) return;
-        var now = System.DateTimeOffset.UtcNow;
         var msg = new PoseStampedMsg();
         msg.header.frame_id = frameId;
-        long ms = now.ToUnixTimeMilliseconds();
-        msg.header.stamp.sec = (int)(ms / 1000);
-        msg.header.stamp.nanosec = (uint)((ms % 1000) * 1000000);
+        long ns = UtcNanoseconds();
+        msg.header.stamp.sec = (int)(ns / 1000000000L);
+        msg.header.stamp.nanosec = (uint)(ns % 1000000000L);
         // A fixed visual base reference supplies axes only; ROS anchors to actual TCP.
         msg.pose.position = robotBase.InverseTransformPoint(rightController.position).To<FLU>();
         msg.pose.orientation = (Quaternion.Inverse(robotBase.rotation) * rightController.rotation).To<FLU>();
@@ -83,5 +135,10 @@ public class ControllerPosePublisher : MonoBehaviour
         if (ros != null) ros.Publish("/vr/right_hand/active", new BoolMsg(false));
         if (configured && legacyPublisher != null) legacyPublisher.poseInputMode = false;
         released = false;
+    }
+
+    private void OnDestroy()
+    {
+        if (ros != null) ros.Unsubscribe("/teleop/clock_ping");
     }
 }
