@@ -1,6 +1,7 @@
 """ROS-independent pose mapping and bounded Cartesian setpoints (quaternions xyzw)."""
 from dataclasses import dataclass
 import math
+import time
 
 
 def norm(v):
@@ -116,6 +117,7 @@ class ServoSession:
     def __init__(self, control, linear_speed=.02, angular_speed=.12, lookahead=.1, gain=300.):
         self.control=control; self.linear_speed=linear_speed; self.angular_speed=angular_speed
         self.lookahead=lookahead; self.gain=gain; self.command=None
+        self.timings={}
 
     def stop(self):
         if self.command is not None:
@@ -123,16 +125,23 @@ class ServoSession:
             if self.control is not None: self.control.servoStop()
 
     def step(self, actual, target, dt):
+        self.timings={}
         if target is None:
             self.stop(); return None
         if self.control is None: return target
         current=self.command or actual
         command=bounded_step(current,target,self.linear_speed*dt,self.angular_speed*dt)
         values=command.ur()
-        if not self.control.isPoseWithinSafetyLimits(values):
+        started=time.monotonic()
+        safe=self.control.isPoseWithinSafetyLimits(values)
+        self.timings['isPoseWithinSafetyLimits']=time.monotonic()-started
+        if not safe:
             self.stop(); raise RuntimeError('Target outside robot safety limits')
         # Mark before the call so shutdown also stops a command whose acknowledgement fails.
         self.command=command
-        if not self.control.servoL(values,0.,0.,dt,self.lookahead,self.gain):
+        started=time.monotonic()
+        accepted=self.control.servoL(values,0.,0.,dt,self.lookahead,self.gain)
+        self.timings['servoL']=time.monotonic()-started
+        if not accepted:
             self.stop(); raise RuntimeError('servoL rejected')
         return command

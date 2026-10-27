@@ -85,9 +85,16 @@ class UrRtdeBridge(Node):
             session=ServoSession(control,self.cfg['max_linear_speed'],self.cfg['max_angular_speed'],
                                  self.cfg['lookahead_time'],self.cfg['gain'])
             dt=1/self.cfg['frequency'];last_stamp=None;last_fresh=time.monotonic();last_cycle=None
+            previous_timings={}
+            self.get_logger().info(
+                f'RTDE timing diagnostics: frequency={self.cfg["frequency"]:.1f}Hz, '
+                f'period={dt*1000:.1f}ms, missed-cycle threshold={10*dt*1000:.1f}ms')
             while not self.stopping.is_set():
                 cycle=time.monotonic()
+                timings={}
                 period=control.initPeriod() if control else None
+                timings['initPeriod']=time.monotonic()-cycle
+                started=time.monotonic()
                 if not receive.isConnected() or (control and not control.isConnected()):
                     raise RuntimeError('RTDE disconnected')
                 stamp=receive.getTimestamp()
@@ -105,6 +112,7 @@ class UrRtdeBridge(Node):
                     active=self.active;target=self.target;age=cycle-self.target_time
                     heartbeat_age=cycle-self.active_time;arm_age=cycle-self.arm_time
                 ready=(receive.getSafetyMode()==1 and receive.getRobotMode()==7)
+                timings['feedback_and_state']=time.monotonic()-started
                 if control and not ready:
                     session.stop();self.trip('ROBOT_NOT_READY_RELEASE_TO_REARM');target=None
                 elif active and (heartbeat_age>self.cfg['command_timeout'] or
@@ -113,19 +121,35 @@ class UrRtdeBridge(Node):
                     session.stop();self.trip('STALE_COMMAND_RELEASE_TO_REARM');target=None
                 elif not active: target=None
                 if control and target is not None and last_cycle is not None and cycle-last_cycle>4*dt:
+                    elapsed=cycle-last_cycle
                     session.stop();self.trip('MISSED_CONTROL_PERIOD_RELEASE_TO_REARM');target=None
+                    details=', '.join(f'{k}={v*1000:.2f}ms' for k,v in previous_timings.items())
+                    current=', '.join(f'{k}={v*1000:.2f}ms' for k,v in timings.items())
+                    self.get_logger().error(
+                        f'RTDE missed cycle: interval={elapsed*1000:.2f}ms, '
+                        f'limit={10*dt*1000:.2f}ms; previous cycle: {details}; '
+                        f'current cycle before stop: {current}; '
+                        f'target_age={age*1000:.2f}ms, heartbeat_age={heartbeat_age*1000:.2f}ms')
                 if session.command is not None:
                     linear,angular=distance(actual,session.command)
                     if linear>self.cfg['max_tracking_error'] or angular>self.cfg['max_angular_tracking_error']:
                         session.stop();self.trip('TRACKING_ERROR_RELEASE_TO_REARM');target=None
+                started=time.monotonic()
                 session.step(actual,target,dt)
+                timings['session_step_total']=time.monotonic()-started
+                timings.update(session.timings)
                 with self.lock:
                     if not self.faulted:
                         self.status=('TRACKING' if control else 'PREVIEW') if target else 'IDLE'
                     elif not active and self.released: self.status='READY_RELEASED' if control else 'PREVIEW_RELEASED'
                 last_cycle=cycle
+                timings['before_wait_total']=time.monotonic()-cycle
+                started=time.monotonic()
                 if control: control.waitPeriod(period)
                 else: self.stopping.wait(max(0.,dt-(time.monotonic()-cycle)))
+                timings['waitPeriod' if control else 'preview_wait']=time.monotonic()-started
+                timings['cycle_total']=time.monotonic()-cycle
+                previous_timings=timings
         except Exception as exc:
             self.trip('FAULT: '+str(exc));self.get_logger().error(str(exc))
         finally:
