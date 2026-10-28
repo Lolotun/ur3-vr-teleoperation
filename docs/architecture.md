@@ -54,3 +54,9 @@ robot_state_publisher → TF → tcp_actual_publisher → /team_1/tcp_actual
 исторический ikpy solver для этого не требуется.
 Compose использует один сервис: переключение меняет command и пересоздаёт сервис.
 Проверка столкновений Servo в перенесённом конфиге выключена.
+
+## Позиционный RTDE backend
+
+Реализован отдельной командой rtde: pose руки → относительная цель → servoL.
+Обратная связь берётся из RTDE. Архитектура, frame mapping и ограничения:
+[rtde.md](rtde.md). Прежние разделы выше описывают speedl/Servo, а не этот режим.

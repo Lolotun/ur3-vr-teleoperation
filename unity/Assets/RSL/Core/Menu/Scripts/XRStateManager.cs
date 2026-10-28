@@ -29,6 +29,8 @@ namespace RSL.Core.Menu
 
         // Flag to track whether tracking has been acquired at least once (to avoid trying to create an anchor before tracking is available)
         bool TrackingAcquired = false;
+        // Manual placement owns the origin until the next application session.
+        public bool ManualPlacement { get; set; }
 
         void Start()
         {
@@ -50,6 +52,7 @@ namespace RSL.Core.Menu
 
         void Update()
         {
+            if (ManualPlacement) return;
             if (originAnchor == null || !originAnchor.TryGetComponent<OVRSpatialAnchor>(out _))
             {
                 // Debug.Log("No anchor created yet, saving position");
@@ -90,6 +93,7 @@ namespace RSL.Core.Menu
 
         async void LocalizeOrigin()
         {
+            if (ManualPlacement) return;
             if (originAnchor == null)
             {
                 // Debug.LogWarning("Origin anchor not created yet");
@@ -106,6 +110,8 @@ namespace RSL.Core.Menu
 
             // Wait for localization so it becomes world‑locked
             await anchor.WhenLocalizedAsync();
+
+            if (ManualPlacement) return;
 
 
             float distanceToOrigin = Vector3.Distance(originAnchor.transform.position, Vector3.zero);

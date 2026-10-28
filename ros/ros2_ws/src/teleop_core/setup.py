@@ -26,6 +26,8 @@ setup(
             "robotiq_gripper_bridge = teleop_core.robotiq_gripper_bridge:main",
             "servo_joint_state_adapter = teleop_core.servo_joint_state_adapter:main",
             "servo_twist_enable = teleop_core.servo_twist_enable:main",
+            "relative_pose_controller = teleop_core.relative_pose_controller:main",
+            "ur_rtde_bridge = teleop_core.ur_rtde_bridge:main",
             "tcp_actual_publisher = teleop_core.tcp_actual_publisher:main",
         ],
     },

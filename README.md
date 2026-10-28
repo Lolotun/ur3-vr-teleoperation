@@ -65,6 +65,26 @@ External Control Play для этого режима не требуется.
 для Editor на том же компьютере IP `127.0.0.1`, для Quest — доступный по Wi-Fi IP компьютера.
 При ошибке Meta XR на Linux см. [инструкцию восстановления прежнего исправления](docs/setup.md#unity).
 
+### Meta XR SDK на Linux
+
+Meta XR Core SDK **85.0.0** загружается Unity Package Manager; полная копия SDK
+не хранится в Git. В этой версии на Linux возможна ошибка компиляции:
+
+```text
+Installer.cs: error CS0103: The name 'downloadedInstallerPath' does not exist in the current context
+```
+
+После загрузки пакетов выполнить из корня репозитория:
+
+```bash
+python3 scripts/patch-meta-xr.py
+```
+
+Скрипт локально исключает загрузчик установщика Meta XR Simulator на Linux,
+сохраняя поведение Windows/macOS. Вернуться в Unity и дождаться перекомпиляции.
+Повторный запуск безопасен; после удаления `unity/Library` или повторной загрузки
+SDK исправление нужно применить снова. RTDE, сцена и APK от этой правки не меняются.
+
 Остановка:
 
 ```bash
@@ -72,8 +92,8 @@ External Control Play для этого режима не требуется.
 ```
 
 Это **скоростное** управление: удержание Right Trigger и отклонение контроллера
-задают скорость TCP; Right Grip управляет захватом. Относительное позиционное
-управление, DAgger и обучение пока не реализованы.
+задают скорость TCP; Right Grip управляет захватом. Позиционный режим через ur_rtde описан в [docs/rtde.md](docs/rtde.md).
+DAgger и обучение пока не реализованы.
 
 ## Происхождение
 
@@ -81,3 +101,11 @@ Unity основан на ETH Zürich / leggedrobotics `unity_ros_teleoperation`
 его BSD-3-Clause лицензия сохранена в [unity/LICENSE](unity/LICENSE).
 Модели и учебные ресурсы имеют отдельное происхождение, описанное в
 [docs/provenance.md](docs/provenance.md). Общая новая лицензия на весь набор не назначалась.
+
+## Ветка ur_rtde: относительная целевая поза
+
+Добавлен `./scripts/run.sh rtde`. По умолчанию он только читает состояние UR3
+и публикует цель без движения (`RTDE_ENABLE_MOTION=false`). Нужна новая сборка
+образа и включённый Pose Mode у ControllerPosePublisher в Unity.
+Начать с [пошаговой проверки preview](docs/rtde.md), затем явно включать движение.
+Существующие команды servo и up не меняют свой смысл.
