@@ -181,4 +181,5 @@ def main():
     try: rclpy.spin(node)
     except KeyboardInterrupt: pass
     finally:
-        node.enabled_pub.publish(Bool(data=False));node.destroy_node();rclpy.shutdown()
+        if rclpy.ok(): node.enabled_pub.publish(Bool(data=False))
+        node.destroy_node();rclpy.try_shutdown()

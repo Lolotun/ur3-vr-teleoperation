@@ -104,8 +104,9 @@ Unity основан на ETH Zürich / leggedrobotics `unity_ros_teleoperation`
 
 ## Ветка ur_rtde: относительная целевая поза
 
-Добавлен `./scripts/run.sh rtde`. По умолчанию он только читает состояние UR3
-и публикует цель без движения (`RTDE_ENABLE_MOTION=false`). Нужна новая сборка
+Команда `./scripts/run.sh rtde` запускает цепочку relative pose → регулятор позы →
+MoveIt Servo на ПК → суставные команды → RTDE `servoJ`. По умолчанию это preview:
+чтение состояния и расчёт команд без движения (`RTDE_ENABLE_MOTION=false`). Нужна новая сборка
 образа и включённый Pose Mode у ControllerPosePublisher в Unity.
 Начать с [пошаговой проверки preview](docs/rtde.md), затем явно включать движение.
 Существующие команды servo и up не меняют свой смысл.

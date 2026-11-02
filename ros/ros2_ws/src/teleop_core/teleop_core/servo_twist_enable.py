@@ -22,8 +22,9 @@ class ServoTwistEnable(Node):
 
         self._servo_clients = [
             ("start", self.create_client(Trigger, start_service)),
-            ("unpause", self.create_client(Trigger, unpause_service)),
         ]
+        if unpause_service:
+            self._servo_clients.append(("unpause", self.create_client(Trigger, unpause_service)))
         self._done: set[str] = set()
         self._request_in_flight = None
         self._request_name = ""
@@ -69,7 +70,7 @@ def main() -> None:
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == "__main__":

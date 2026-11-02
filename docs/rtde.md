@@ -1,14 +1,19 @@
 # Позиционная телеоперация через ur_rtde
 
 Режим ветки `ur_rtde`. Старые `servo` (виртуальный) и `up` / `wifi-speedl` сохранены.
-Здесь Servo из MoveIt не используется: `ur_rtde.servoL` исполняет целевые позы
-через программу на контроллере UR, с внутренней кинематикой робота.
+Кинематика и обработка сингулярностей выполняются в MoveIt Servo на ПК.
+`ur_rtde_bridge` интегрирует ограниченные суставные скорости Servo в непрерывную
+позиционную команду для `ur_rtde.servoJ`, контролируя её отставание от actual Q. Режим использует ROS 2 Humble и обычный UR3 (CB3).
 
 ```text
-Unity ControllerPosePublisher: pose + Trigger heartbeat
-    → relative_pose_controller: anchors + target_pose
-    → ur_rtde_bridge: ограниченные шаги pose → servoL
-UR RTDE Receive → /teleop/tcp_actual + /joint_states + /teleop/rtde_status
+Unity ControllerPosePublisher: pose + Trigger heartbeat (30 Гц)
+    → relative_pose_controller → /teleop/target_pose + /teleop/active (30 Гц)
+    → pose_tracking_controller → /teleop/servo/twist + /teleop/servo/active (125 Гц)
+    → MoveIt Servo → /teleop/servo/joint_trajectory (125 Гц)
+    → ur_rtde_bridge: интегратор суставных скоростей → servoJ (125 Гц)
+UR RTDE Receive → /teleop/tcp_actual + /joint_states (до 125 Гц, только свежие отсчёты)
+Статусы: /teleop/pose_status, /teleop/tracking_status,
+         /teleop/servo/status (Int8), /teleop/rtde_status
 ```
 
 ## Первый запуск: без отправки движения
@@ -42,7 +47,10 @@ UR RTDE Receive → /teleop/tcp_actual + /joint_states + /teleop/rtde_status
    Отпустить Trigger после старта, затем нажать и двигать контроллер.
 
 Preview создаёт только RTDEReceiveInterface: не загружает управляющий скрипт,
-не создаёт RTDEControlInterface и не вызывает servoL. Обратная связь читается
+не создаёт RTDEControlInterface и не вызывает servoJ. MoveIt Servo при этом
+работает и публикует рассчитанные суставные команды для просмотра. Мост в preview
+проверяет один шаг от actual Q без накопления интегратора: робот намеренно не
+движется, и накопление вызвало бы ложную ошибку отставания. Обратная связь читается
 с реального робота. Мост захвата выключен независимо от ENABLE_GRIPPER старого режима.
 Тесты с поддельным роботом описаны ниже; это не отдельный пользовательский симулятор.
 
@@ -58,6 +66,10 @@ ros2 topic echo /vr/right_hand/pose
 ros2 topic echo /teleop/target_pose
 ros2 topic echo /teleop/rtde_status
 ros2 topic echo /teleop/pose_status
+ros2 topic echo /teleop/servo/twist
+ros2 topic echo /teleop/servo/joint_trajectory
+ros2 topic echo /teleop/servo/status
+ros2 topic echo /teleop/tracking_status
 ```
 
 ## Координаты, опорная поза и вращение
@@ -138,57 +150,113 @@ RTDE_ENABLE_GRIPPER=true
 Для CB3 UR3 начальная частота 125 Гц; e-Series может использовать 500 Гц,
 но менять её следует после проверки модели и времени цикла.
 
-### Локальная проверка позы
+## Регулятор позы и MoveIt Servo
 
-`RTDE_POSE_CHECK_MODE=local` заменяет запрос `isPoseWithinSafetyLimits` в каждом
-servo-цикле локальной проверкой конечности поз, смещения/вращения цели от TCP при
-начале удержания и размера servo-шага. Пределы берутся из
-`RTDE_MAX_DISPLACEMENT`, `RTDE_MAX_ROTATION`, `RTDE_MAX_LINEAR_SPEED` и
-`RTDE_MAX_ANGULAR_SPEED`. При отпускании опора сбрасывается. Проверки свежести,
-состояния робота, отставания и пропуска периода остаются в мосте.
+`relative_pose_controller` по-прежнему фиксирует опоры руки/робота и выдаёт
+абсолютную целевую позу. Между обновлениями цели регулятор 125 Гц удерживает
+последнюю цель и каждый раз пересчитывает ошибку относительно actual TCP:
 
-Это проверка декартовых ограничений, а не эквивалент `isPoseWithinSafetyLimits`:
-нет локального IK, проверки суставных ограничений, столкновений и safety planes
-из установки UR. Встроенные защиты контроллера UR не перенастраиваются.
-Режим по умолчанию — `robot`, он сохраняет удалённую проверку перед каждым шагом.
-В измерениях на установке чередование проверки и servoL занимало около 40 мс;
-непрерывный servoL с фиксированной целью укладывался в период 8 мс. Это не
-гарантирует такую же частоту при меняющейся цели.
+- `v = position_gain * (target.position - actual.position)`;
+- угловая скорость — `rotation_gain` на кратчайший вектор ошибки вращения;
+- нормы скоростей ограничены `RTDE_MAX_LINEAR_SPEED` и `RTDE_MAX_ANGULAR_SPEED`.
 
-Никакого автоматического moveL к стартовой точке нет. Первый servo-setpoint
-берётся из actual TCP; последующие шаги ограничены 0.020 м/с и 0.12 рад/с.
-Параметры speed/acceleration у servoL в ur_rtde 1.6.2 не используются библиотекой:
-ограничения реализованы шагами позы, а не этими аргументами.
+`RTDE_POSITION_GAIN` и `RTDE_ROTATION_GAIN` по умолчанию 2.0 1/с. Это коэффициенты
+внешней обратной связи, отдельные от `RTDE_GAIN` внутреннего `servoJ`.
+Цели, actual TCP и входной Twist выражены в `base`. Planning frame Servo —
+`base_link`, совпадающий с основанием SRDF/KDL-цепи; Servo сам преобразует Twist
+между этими системами. Servo получает реальные `/joint_states`,
+модель UR3 и Twist, рассчитывает суставные положения/скорости и публикует
+короткую `JointTrajectory` с одной точкой. Частота регулятора, Servo и RTDE
+задаётся одним `RTDE_FREQUENCY` (по умолчанию 125; для этого UR3 launch — не выше 125).
+Возможность выдерживать период 8 мс на установке необходимо измерить.
 
-Ограничения и остановки:
+Суставные скорости берутся из `config/joint_limits.yaml` (1.0 рад/с для первых
+трёх, 1.2 рад/с для запястья), ограниченные сверху пределами URDF.
+Те же пределы получает мост. Он упорядочивает суставы по именам, проверяет
+числа и положения, интегрирует выходные скорости Servo:
+`q_cmd[k+1] = q_cmd[k] + qd_servo[k] / frequency`. Позиции из Servo остаются
+дополнительной проверкой входной команды. Мост ограничивает общий масштаб каждого отправляемого шага
+`q_cmd - q_previous` так, чтобы каждый сустав укладывался в `max_velocity / frequency`.
+Первый шаг начинается с actual Q; отпускание сбрасывает опору команды.
+Нулевые команды после повторного включения удерживают новую actual Q, а не
+старую позицию, которую Servo мог сохранить до отпускания. Непрерывный
+`wrist_3` разворачивается в ближайший к actual угол без скачка на полный оборот.
+Это ограничения команд; фактическая динамика зависит от контроллера UR.
 
-- Максимальное относительное смещение за один clutch: 0.25 м, вращение 1 рад.
-- Перестали обновляться команда/heartbeat или RTDE timestamp — остановка.
-- Не normal safety mode / не running robot mode — остановка движения.
-- Отставание actual от исполняемой команды >0.05 м или >0.35 рад — остановка.
-- Пропуск периода управления >4 периодов — остановка.
-- Перед servoL выполняется выбранная проверка (`robot` или `local`);
-  отклонение/ошибка servoL — остановка.
-- После тайм-аута/ошибки продолжение удержания Trigger не возобновляет движение:
-  требуется отпускание и новая привязка. Ошибка соединения завершает worker;
-  после восстановления требуется перезапустить режим.
+Непрерывная опора нужна для исполнения через позиционный `servoJ`: если каждый
+раз передавать только `actual Q + qd * 0.008`, контроллер с конечным временем
+отклика не успевает выполнить шаг, а следующая цель снова строится от actual.
+Это снижает фактическую скорость. Интегратор сохраняет опору между циклами;
+при отпускании, тайм-ауте или ошибке она сбрасывается. При отставании actual
+больше `RTDE_MAX_JOINT_TRACKING_ERROR` интегратор останавливается, а не продолжает
+накапливать команду. Лимиты скорости и параметры gain/lookahead этим исправлением
+не увеличиваются.
 
-Это программные ограничения прототипа, не сертифицированная система безопасности.
-Проверки столкновений со сценой, планирование обхода препятствий и ограничение jerk
-не реализованы. Состояния выводятся в rtde_status; ошибки не скрываются автопереподключением.
+`RTDE_LOWER_SINGULARITY_THRESHOLD=17` начинает замедление при движении к
+сингулярности, `RTDE_HARD_STOP_SINGULARITY_THRESHOLD=30` останавливает его.
+Для выхода учитывается `leaving_singularity_threshold_multiplier=2`.
+Эти параметры масштабируют скорость по обусловленности якобиана, а не включают DLS.
+
+### Модель, TCP и будущая калибровка
+
+Пока используется официальный nominal UR3 из `ur_description`. Одно и то же
+описание получают Servo и `robot_state_publisher`. Позже файл заводской
+калибровки можно передать параметром launch `kinematics_params_file` или
+`RTDE_KINEMATICS_PARAMS_FILE` — путь должен существовать **в контейнере**.
+Например, файл внутри `teleop_core/config/` попадает в образ при сборке; для
+внешнего файла добавьте read-only volume в локальный Compose override.
+
+Для активного TCP к `tool0` добавлен фиксированный link `teleop_tcp`; он же
+является концом кинематической цепи. Настройки:
+
+```dotenv
+RTDE_TCP_XYZ=[0.0, 0.0, 0.0]
+RTDE_TCP_RPY=[0.0, 0.0, 0.0]
+```
+
+XYZ — метры; RPY — фиксированные углы roll/pitch/yaw в радианах, **не** UR rotation
+vector. Нули соответствуют TCP `tool0`. Если на pendant настроен иной активный TCP,
+нужно задать такое же смещение здесь до движения. Автоматического чтения/изменения
+TCP и проверки совпадения FK с actual TCP пока нет. После загрузки калибровки
+сверить FK `base → teleop_tcp` и RTDE TCP в нескольких конфигурациях.
+
+### Остановки
+
+- Относительная цель ограничена `RTDE_MAX_DISPLACEMENT` и `RTDE_MAX_ROTATION`.
+- Потеря позы/heartbeat, actual feedback или команд Servo блокирует движение.
+- `RTDE_TRAJECTORY_TIMEOUT=0.1` ограничивает ожидание очередной команды Servo;
+  `RTDE_COMMAND_TIMEOUT=0.25` — heartbeat; `RTDE_FEEDBACK_TIMEOUT=0.25` — feedback.
+- Humble Servo публикует stamp=0 («сразу»); для таких команд используется время
+  приёма. Для ненулевой метки дополнительно проверяются возраст и порядок.
+  Подписка глубиной 1 хранит последнюю команду, траектории не накапливаются.
+- Расхождение командного/целевого положения сустава с actual больше
+  `RTDE_MAX_JOINT_TRACKING_ERROR=0.15` рад вызывает остановку.
+- Не normal safety mode / не running robot mode, пропуск цикла >4 периодов,
+  неверная траектория или отказ `servoJ` вызывают остановку.
+- После ошибки требуется отпускание и новое нажатие Trigger. Ошибка RTDE или
+  исполнения команды завершает worker; для восстановления нужен перезапуск режима.
+- При выключенном управлении регулятор отправляет нулевой Twist и false
+  на `/teleop/servo/active`; мост вызывает `servoStop` из своего рабочего потока.
+
+Прежний `RTDE_POSE_CHECK_MODE` больше не используется: удалённого
+`isPoseWithinSafetyLimits` и `servoL` в этой цепочке нет. Старую переменную
+можно удалить из локального `.env`.
+
+Это программные ограничения прототипа. Collision checking в новом конфиге
+выключен до настройки геометрии установки. Ограничения ускорения из YAML сами
+по себе не гарантируют ограничение ускорения/jerk в выбранном фильтре Servo;
+отдельного ограничителя ускорения в мосте нет. Встроенные защиты UR сохраняются.
 
 ## Реализация
 
-- `unity/Assets/Scripts/ControllerPosePublisher.cs` — ввод, tracking, heartbeat и выбор режима.
-- `ControllerTwistPublisher.cs` — сохранён; в Pose Mode перестаёт публиковать Twist,
-  но продолжает обслуживать прежний ввод захвата.
-- `pose_control.py` — математика, clutch, ограничение шага и ServoSession без ROS.
-- `relative_pose_controller.py` — подписки, freshness и публикация цели.
-- `ur_rtde_bridge.py` — один поток владеет Receive/Control; ROS callbacks только
-  обновляют последние данные под блокировкой. Очередь целей не накапливается.
-- `rtde_real.launch.py` — только Endpoint, относительный контроллер, RTDE bridge,
-  опциональный Robotiq. Официальный UR Driver и speedl-мост не запускаются.
-- `ros/requirements.txt` — точная версия ur_rtde 1.6.2, устанавливается Dockerfile.
+- `relative_pose_controller.py` — относительная привязка, свежесть ввода и цель.
+- `pose_tracking_controller.py` — обратная связь по позе, Twist и разрешение движения.
+- `joint_control.py` — математика регулятора и проверка/ограничение суставных команд.
+- `ur3_rtde_servo.yaml` — отдельная конфигурация Servo реального режима.
+- `ur_rtde_bridge.py` — один поток владеет Receive/Control; публикует actual Q/Qd/TCP,
+  принимает последнюю суставную команду, интегрирует ограниченные скорости и исполняет `servoJ`.
+- `rtde_real.launch.py` — общая модель, настройки частоты, все узлы цепочки,
+  опциональный Robotiq. UR Driver и старый speedl-мост не запускаются.
 
 Переход назад: отпустить Trigger, выключить Pose Mode в Unity, затем
 `./scripts/run.sh servo` или `./scripts/run.sh up`.
@@ -201,13 +269,13 @@ PYTHONPATH=ros/ros2_ws/src/teleop_core python3 -m unittest discover -s tests -v
 python3 tests/rtde_ros_smoke.py -v
 ```
 
-Второй тест подменяет rtde_receive/rtde_control до импорта bridge. Он проверяет
-preview, командный путь, остановку при пропаже поз и RTDE feedback и запрет
-самопроизвольного возобновления. Его нельзя использовать как подтверждение
-сетевых задержек или динамики реального робота.
+Второй тест запускает настоящий MoveIt Servo с nominal UR3 и ненулевым смещением
+TCP, подменяя только RTDE Receive/Control. Проверяет сквозную цепочку с вводом
+30 Гц, движение по рассчитанным суставным положениям, preview без ControlInterface,
+ограничение каждого суставного шага, остановки при потере VR/Servo/feedback
+и запрет возобновления при удерживаемом Trigger. Поддельный робот имеет конечное время отклика на позиционные команды, чтобы
+выявлять потерю скорости при привязке каждого шага к actual Q. Это приближение
+не подтверждает сетевые задержки и динамику реального UR3.
 
-Источники API: [ur_rtde](https://sdurobotics.gitlab.io/ur_rtde/),
-[пример servoL](https://sdurobotics.gitlab.io/ur_rtde/pages/examples/high_frequency_servoing/servol_example.html).
-Логика относительной привязки сопоставлена с локальным Quest2ROS2
-`q2r2_bringup/robot_arm_controller_base.py`; код написан отдельно для текущих topics
-и RTDE. Политика/DAgger и переключение автономного управления ещё не реализованы.
+Источники: [MoveIt Servo Humble](https://moveit.picknik.ai/humble/doc/examples/realtime_servo/realtime_servo_tutorial.html),
+[ur_rtde servoJ](https://sdurobotics.gitlab.io/ur_rtde/pages/examples/high_frequency_servoing/servoj_example.html).

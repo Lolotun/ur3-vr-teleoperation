@@ -16,15 +16,27 @@ case "${1:-wifi_speedl}" in
       trajectory_topic:=${SERVO_TRAJECTORY_TOPIC:-/team_1/servo_joint_trajectory}
     ;;
   rtde_real)
+    calibration_args=()
+    if [[ -n "${RTDE_KINEMATICS_PARAMS_FILE:-}" ]]; then
+      calibration_args+=("kinematics_params_file:=${RTDE_KINEMATICS_PARAMS_FILE}")
+    fi
     exec ros2 launch teleop_core rtde_real.launch.py \
       robot_ip:=${ROBOT_IP:?Set ROBOT_IP} \
       tcp_port:=${ROS_TCP_PORT:-10000} \
       enable_motion:=${RTDE_ENABLE_MOTION:-false} \
-      pose_check_mode:=${RTDE_POSE_CHECK_MODE:-robot} \
       enable_gripper:=${RTDE_ENABLE_GRIPPER:-false} \
       gripper_port:=${GRIPPER_PORT:-63352} \
       gripper_force:=${GRIPPER_FORCE:-20} \
       frequency:=${RTDE_FREQUENCY:-125.0} \
+      trajectory_timeout:=${RTDE_TRAJECTORY_TIMEOUT:-0.1} \
+      position_gain:=${RTDE_POSITION_GAIN:-2.0} \
+      rotation_gain:=${RTDE_ROTATION_GAIN:-2.0} \
+      max_joint_tracking_error:=${RTDE_MAX_JOINT_TRACKING_ERROR:-0.15} \
+      "${calibration_args[@]}" \
+      "tcp_xyz:=${RTDE_TCP_XYZ:-[0.0, 0.0, 0.0]}" \
+      "tcp_rpy:=${RTDE_TCP_RPY:-[0.0, 0.0, 0.0]}" \
+      lower_singularity_threshold:=${RTDE_LOWER_SINGULARITY_THRESHOLD:-17.0} \
+      hard_stop_singularity_threshold:=${RTDE_HARD_STOP_SINGULARITY_THRESHOLD:-30.0} \
       position_scale:=${RTDE_POSITION_SCALE:-1.0} \
       mapping_yaw_deg:=${RTDE_MAPPING_YAW_DEG:-180.0} \
       max_displacement:=${RTDE_MAX_DISPLACEMENT:-0.25} \
