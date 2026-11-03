@@ -2614,6 +2614,10 @@ MonoBehaviour:
   angularRosSigns: {x: 1, y: 1, z: -1}
   publishGripperCommands: 1
   gripperTopic: /team_1/gripper_command
+  analogGripperControl: 1
+  latchGripperWithA: 1
+  gripperPublishHz: 10
+  gripperDeadZone: 0.02
   gripCloseThreshold: 0.65
   animateGripperVisual: 0
   gripperRoot: {fileID: 818586897}
@@ -6470,6 +6474,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::SimGripperPickup
   gripperRoot: {fileID: 818586897}
+  commandSource: {fileID: 320328464}
   attachRadius: 0.6
   gripCloseThreshold: 0.65
   enabledInSimulation: 1

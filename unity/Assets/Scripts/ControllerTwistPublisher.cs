@@ -5,6 +5,7 @@ using Unity.Robotics.ROSTCPConnector;
 using Unity.Robotics.ROSTCPConnector.ROSGeometry;
 using UnityEngine;
 using UnityEngine.XR;
+using System.Globalization;
 
 public class ControllerTwistPublisher : MonoBehaviour
 {
@@ -30,6 +31,12 @@ public class ControllerTwistPublisher : MonoBehaviour
     [Header("Robotiq Gripper")]
     public bool publishGripperCommands = true;
     public string gripperTopic = "/team_1/gripper_command";
+    [Tooltip("Send proportional Grip position instead of binary open/close.")]
+    public bool analogGripperControl = true;
+    [Tooltip("Right A toggles between holding the current position and following Grip.")]
+    public bool latchGripperWithA = true;
+    public float gripperPublishHz = 10f;
+    [Range(0f, 0.2f)] public float gripperDeadZone = 0.02f;
     public float gripCloseThreshold = 0.65f;
     public bool animateGripperVisual = true;
     public Transform gripperRoot;
@@ -44,8 +51,12 @@ public class ControllerTwistPublisher : MonoBehaviour
     private float publishInterval;
     private float nextPublishTime;
     private bool wasTriggerPressed;
-    private bool wasGripClosed;
     private bool hasPublishedGripState;
+    private int lastGripperPosition;
+    private float nextGripperPublish;
+    private readonly GripperCommandState gripperState = new GripperCommandState();
+    public float GripperPosition => gripperState.Position;
+    public bool GripperLatched => gripperState.Latched;
     private Transform rightOuterKnuckle;
     private Transform leftOuterKnuckle;
     private Transform rightInnerKnuckle;
@@ -62,6 +73,7 @@ public class ControllerTwistPublisher : MonoBehaviour
     public void SetCalibrationBlocked(bool blocked)
     {
         calibrationBlocked = blocked;
+        gripperState.DisarmPrimary();
         if (ros != null && twistMsg != null) PublishZeroTwist();
         wasTriggerPressed = false;
         hasNeutralPose = false;
@@ -175,26 +187,47 @@ public class ControllerTwistPublisher : MonoBehaviour
 
     private void PublishGripperCommandIfChanged()
     {
-        if (!publishGripperCommands || ros == null)
+        if (ros == null)
         {
             return;
         }
 
-        bool gripClosed = IsRightGripClosed();
-        if (hasPublishedGripState && gripClosed == wasGripClosed)
+        if (!TryReadRightGrip(out float grip, out bool primaryPressed))
         {
+            // Tracking loss must not toggle the latch or send an open command.
+            gripperState.DisarmPrimary();
             return;
         }
+        grip = grip < gripperDeadZone ? 0f : Mathf.Clamp01(grip);
+        if (!analogGripperControl) grip = grip > gripCloseThreshold ? 1f : 0f;
+        bool wasLatched = gripperState.Latched;
+        gripperState.Update(grip, latchGripperWithA && primaryPressed);
+        if (wasLatched != gripperState.Latched)
+        {
+            hasPublishedGripState = false;
+            Debug.Log($"[ControllerTwistPublisher] gripper {(gripperState.Latched ? "latched" : "following Grip")} at {gripperState.Position:F3}");
+        }
 
-        gripperMsg.data = gripClosed ? "close" : "open";
+        if (!publishGripperCommands || Time.unscaledTime < nextGripperPublish) return;
+        int position = Mathf.RoundToInt(gripperState.Position * 255f);
+        if (hasPublishedGripState && position == lastGripperPosition) return;
+        if (gripperMsg == null)
+        {
+            gripperMsg = new StringMsg();
+            ros.RegisterPublisher<StringMsg>(gripperTopic);
+        }
+        // Preserve the existing String topic; normalize to 0..1 with a locale-independent decimal point.
+        gripperMsg.data = (position / 255f).ToString("F3", CultureInfo.InvariantCulture);
         ros.Publish(gripperTopic, gripperMsg);
-        wasGripClosed = gripClosed;
+        lastGripperPosition = position;
+        nextGripperPublish = Time.unscaledTime + 1f / Mathf.Max(1f, gripperPublishHz);
         hasPublishedGripState = true;
-        Debug.Log($"[ControllerTwistPublisher] gripper {gripperMsg.data}");
     }
 
-    private bool IsRightGripClosed()
+    private bool TryReadRightGrip(out float grip, out bool primaryPressed)
     {
+        grip = 0f;
+        primaryPressed = false;
         if (!rightHandDevice.isValid)
         {
             rightHandDevice = InputDevices.GetDeviceAtXRNode(XRNode.RightHand);
@@ -204,15 +237,21 @@ public class ControllerTwistPublisher : MonoBehaviour
         {
             return false;
         }
+        if (!rightHandDevice.TryGetFeatureValue(CommonUsages.isTracked, out bool tracked) || !tracked)
+            return false;
+        rightHandDevice.TryGetFeatureValue(CommonUsages.primaryButton, out primaryPressed);
 
         if (rightHandDevice.TryGetFeatureValue(CommonUsages.grip, out float gripValue))
         {
-            return gripValue > gripCloseThreshold;
+            if (float.IsNaN(gripValue) || float.IsInfinity(gripValue)) return false;
+            grip = gripValue;
+            return true;
         }
 
         if (rightHandDevice.TryGetFeatureValue(CommonUsages.gripButton, out bool gripButton))
         {
-            return gripButton;
+            grip = gripButton ? 1f : 0f;
+            return true;
         }
 
         return false;
@@ -285,7 +324,7 @@ public class ControllerTwistPublisher : MonoBehaviour
             return;
         }
 
-        float closeDistance = wasGripClosed ? gripperVisualCloseDistance : 0f;
+        float closeDistance = gripperState.Position * gripperVisualCloseDistance;
         SetFingerGroupVisual(rightOuterKnuckle, rightOuterKnuckleOpenPosition, closeDistance);
         SetFingerGroupVisual(leftOuterKnuckle, leftOuterKnuckleOpenPosition, closeDistance);
         SetFingerGroupVisual(rightInnerKnuckle, rightInnerKnuckleOpenPosition, closeDistance);

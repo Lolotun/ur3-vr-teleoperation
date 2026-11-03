@@ -7,6 +7,7 @@ using UnityEngine.XR;
 public class SimGripperPickup : MonoBehaviour
 {
     public Transform gripperRoot;
+    public ControllerTwistPublisher commandSource;
     public float attachRadius = 0.08f;
     public float gripCloseThreshold = 0.65f;
     public bool enabledInSimulation = true;
@@ -20,6 +21,7 @@ public class SimGripperPickup : MonoBehaviour
 
     private void Start()
     {
+        if (commandSource == null) commandSource = FindFirstObjectByType<ControllerTwistPublisher>();
         if (gripperRoot == null)
         {
             GameObject gripperObject = GameObject.Find("robotiq_arg2f_base_link");
@@ -58,6 +60,7 @@ public class SimGripperPickup : MonoBehaviour
 
     private bool IsRightGripClosed()
     {
+        if (commandSource != null) return commandSource.GripperPosition > gripCloseThreshold;
         if (!rightHandDevice.isValid)
         {
             rightHandDevice = InputDevices.GetDeviceAtXRNode(XRNode.RightHand);

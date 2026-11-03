@@ -1,14 +1,16 @@
-"""Small Robotiq 2F socket bridge for the Wi-Fi speedl demo path."""
+"""Robotiq 2F position bridge with rate-limited, latest-command execution."""
 
 from __future__ import annotations
 
 import socket
 import time
+import math
 
 import rclpy
 from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.node import Node
 from std_msgs.msg import String
+from teleop_core.gripper_control import LatestGripperCommand, parse_position
 
 
 class RobotiqGripperBridge(Node):
@@ -40,12 +42,15 @@ class RobotiqGripperBridge(Node):
 
         if not self._robot_ip:
             raise RuntimeError("robot_ip parameter is required")
+        for value in (self._connect_timeout_sec, self._min_command_interval_sec):
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError('Gripper timing parameters must be finite and positive')
 
-        self._last_command = ""
-        self._last_command_time = 0.0
+        self._commands = LatestGripperCommand()
         self._activated = False
 
-        self.create_subscription(String, input_topic, self._on_command, 10)
+        self.create_subscription(String, input_topic, self._on_command, 1)
+        self.create_timer(self._min_command_interval_sec, self._execute_pending)
         self.get_logger().info(
             f"{input_topic} -> Robotiq socket on {self._robot_ip}:{self._robot_port}, "
             f"open={self._open_position}, close={self._close_position}, "
@@ -54,39 +59,24 @@ class RobotiqGripperBridge(Node):
 
     def _on_command(self, msg: String) -> None:
         command = msg.data.strip().lower()
-        now = time.monotonic()
-        if (
-            command == self._last_command
-            and now - self._last_command_time < self._min_command_interval_sec
-        ):
-            return
-
         position = self._parse_position(command)
         if position is None:
             self.get_logger().warn(
-                f"Ignoring gripper command '{msg.data}'. Use open, close, or 0..255."
+                f"Ignoring gripper command '{msg.data}'. Use open, close, 0..1 or 0..255."
             )
             return
 
-        self._last_command = command
-        self._last_command_time = now
-        self._send_position(position)
+        self._commands.offer(position)
+
+    def _execute_pending(self) -> None:
+        position = self._commands.take()
+        if position is not None and self._send_position(position):
+            self._commands.acknowledge(position)
 
     def _parse_position(self, command: str) -> int | None:
-        if command in ("open", "release", "0"):
-            return self._open_position
-        if command in ("close", "grab", "grip", "1"):
-            return self._close_position
-        try:
-            value = float(command)
-        except ValueError:
-            return None
+        return parse_position(command, self._open_position, self._close_position)
 
-        if 0.0 <= value <= 1.0:
-            return self._clamp_byte(round(value * 255.0))
-        return self._clamp_byte(round(value))
-
-    def _send_position(self, position: int) -> None:
+    def _send_position(self, position: int) -> bool:
         lines = []
         if not self._activated:
             lines.extend(["SET ACT 1", "SET GTO 1"])
@@ -109,10 +99,11 @@ class RobotiqGripperBridge(Node):
                     time.sleep(0.01)
         except OSError as exc:
             self.get_logger().warn(f"Robotiq command failed: {exc}")
-            return
+            return False
 
         self._activated = True
         self.get_logger().info(f"Robotiq position sent: {position}")
+        return True
 
     @staticmethod
     def _clamp_byte(value: object) -> int:
@@ -128,7 +119,7 @@ def main() -> None:
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == "__main__":
