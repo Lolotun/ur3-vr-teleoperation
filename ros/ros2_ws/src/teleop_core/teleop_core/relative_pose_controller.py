@@ -6,7 +6,8 @@ import uuid
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, String, Int8
+from teleop_core.joint_control import SERVO_HALT_CODES
 from teleop_core.pose_control import Pose, RelativeController, from_rotvec
 from teleop_core.clock_sync import ClockSync
 
@@ -37,6 +38,7 @@ class RelativePoseController(Node):
               self.cfg['position_scale'],self.cfg['max_displacement'],self.cfg['max_rotation'])
         self.hand=None;self.actual=None;self.hand_time=0.;self.actual_time=0.;self.active_time=0.
         self.active=False;self.last_status='';self.last_hand_stamp=0
+        self.servo_halted=False
         self.hand_error='no hand pose received';self.actual_error='no TCP pose received'
         self.diagnostic_times={}
         self.clock_sync=ClockSync()
@@ -52,6 +54,7 @@ class RelativePoseController(Node):
         self.create_subscription(PoseStamped,'/vr/right_hand/pose',self.on_hand,1)
         self.create_subscription(PoseStamped,'/teleop/tcp_actual',self.on_actual,1)
         self.create_subscription(Bool,'/vr/right_hand/active',self.on_active,1)
+        self.create_subscription(Int8,'/teleop/servo/status',self.on_servo_status,1)
         self.create_timer(1/30,self.tick)
         self.create_timer(.5,self.send_clock_ping)
 
@@ -140,12 +143,18 @@ class RelativePoseController(Node):
         self.active=msg.data;self.active_time=time.monotonic()
         if not msg.data: self.core.release()
 
+    def on_servo_status(self,msg):
+        self.servo_halted=msg.data in SERVO_HALT_CODES
+        if self.servo_halted: self.core.fault()
+
     def tick(self):
         now=time.monotonic();target=None;status='RELEASED'
         if self.clock_sync.estimate(now) is None:
             self.hand=None;self.hand_error='waiting for fresh clock synchronization'
             self.core.fault()
-        if self.active:
+        if self.servo_halted:
+            self.core.fault();status='SERVO_HALT_RELEASE_TO_REARM'
+        elif self.active:
             fresh=(self.hand is not None and self.actual is not None
                    and now-self.hand_time<self.cfg['input_timeout']
                    and now-self.active_time<self.cfg['input_timeout']

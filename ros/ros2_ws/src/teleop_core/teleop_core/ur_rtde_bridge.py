@@ -1,16 +1,19 @@
 """Single-thread-owned RTDE interfaces with read-only preview and release-to-rearm."""
 import math
+import json
 import faulthandler
 import threading
 import time
+from collections import deque
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
 from trajectory_msgs.msg import JointTrajectory
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, String, Int8
+from teleop_core.rtde_diagnostics import json_safe
 from teleop_core.pose_control import Pose
-from teleop_core.joint_control import JointServoSession, ordered_positions, joint_vector
+from teleop_core.joint_control import JointServoSession, ordered_positions, joint_vector, SERVO_HALT_CODES
 from teleop_core.relative_pose_controller import pose_message
 from teleop_core.ur3_model import UR3_ARM_JOINTS
 
@@ -20,7 +23,8 @@ class UrRtdeBridge(Node):
         super().__init__('ur_rtde_bridge')
         defaults={'robot_ip':'','enable_motion':False,'frequency':125.,'command_timeout':.25,
                   'feedback_timeout':.25,'trajectory_timeout':.1,'max_joint_tracking_error':.15,
-                  'lookahead_time':.1,'gain':300.,'robot_frame':'base',
+                  'lookahead_time':.1,'gain':300.,'robot_frame':'base','publish_diagnostics':False,
+                  'lead_soft_start':.06,'lead_soft_limit':.10,
                   'joint_velocity_limits':[1.,1.,1.,1.2,1.2,1.2],
                   'joint_continuous':[False,False,False,False,False,True],
                   'joint_lower_limits':[-2*math.pi]*6,'joint_upper_limits':[2*math.pi]*6}
@@ -36,17 +40,25 @@ class UrRtdeBridge(Node):
         # Validate all execution limits before opening any RTDE connection.
         JointServoSession(None,self.velocity_limits,self.cfg['joint_lower_limits'],
                           self.cfg['joint_upper_limits'],self.cfg['max_joint_tracking_error'],
-                          continuous=self.cfg['joint_continuous'])
+                          continuous=self.cfg['joint_continuous'],
+                          lead_soft_start=self.cfg['lead_soft_start'],lead_soft_limit=self.cfg['lead_soft_limit'])
         self.lock=threading.Lock();self.stopping=threading.Event()
         self.target=None;self.target_time=0.;self.target_stamp=0;self.target_deadline=0.
         self.target_velocity=(0.,)*6
         self.active=False;self.active_time=0.;self.state_sequence=0;self.published_sequence=0
         self.released=False;self.faulted=True;self.arm_time=0.;self.state=None;self.status='CONNECTING'
+        self.execution_fault=None
+        self.trace_queue=deque(maxlen=256);self.trace_dropped=0
+        self.servo_status=(None,None)
+        self.servo_halt_latched=False;self.servo_halt_code=None;self.servo_release_seen=False
+        self.create_subscription(Int8,'/teleop/servo/status',self.on_servo_status,1)
+        self.create_subscription(Bool,'/vr/right_hand/active',self.on_operator_active,1)
         self.create_subscription(JointTrajectory,'/teleop/servo/joint_trajectory',self.on_trajectory,1)
         self.create_subscription(Bool,'/teleop/servo/active',self.on_active,1)
         self.pose_pub=self.create_publisher(PoseStamped,'/teleop/tcp_actual',1)
         self.joint_pub=self.create_publisher(JointState,'/joint_states',1)
         self.status_pub=self.create_publisher(String,'/teleop/rtde_status',1)
+        self.trace_pub=self.create_publisher(String,'/teleop/rtde_diagnostics',10)
         self.create_timer(1/self.cfg['frequency'],self.publish_state)
         self.worker=threading.Thread(target=self.run,name='rtde-control',daemon=True)
         self.worker.start()
@@ -83,8 +95,13 @@ class UrRtdeBridge(Node):
             now=time.monotonic();self.active_time=now
             if not msg.data:
                 self.active=False;self.target=None;self.released=True
-            elif not self.active:
+            elif not self.active and self.execution_fault is None:
                 if self.released:
+                    if self.servo_halt_latched:
+                        code,received=self.servo_status
+                        if (not self.servo_release_seen or code in SERVO_HALT_CODES or received is None
+                                or now-received > self.cfg['trajectory_timeout']): return
+                        self.servo_halt_latched=False
                     self.active=True;self.faulted=False;self.released=False
                     self.arm_time=now;self.target=None
 
@@ -92,9 +109,28 @@ class UrRtdeBridge(Node):
         with self.lock:
             self.faulted=True;self.released=False;self.active=False;self.target=None;self.status=status
 
+    def on_servo_status(self,msg):
+        with self.lock:
+            self.servo_status=(msg.data,time.monotonic())
+            if msg.data in SERVO_HALT_CODES:
+                if not self.servo_halt_latched: self.servo_release_seen=False
+                self.servo_halt_latched=True;self.servo_halt_code=msg.data
+                self.faulted=True;self.active=False;self.released=False;self.target=None
+                self.status=f'SERVO_HALT_RELEASE_TO_REARM: status={msg.data}'
+
+    def on_operator_active(self,msg):
+        # Upstream /servo/active=false can be automatic. Require the physical
+        # clutch release, not just that derived enable falling after a fault.
+        if not msg.data:
+            with self.lock:
+                if self.servo_halt_latched: self.servo_release_seen=True
+
     def publish_state(self):
         with self.lock:
             state=self.state;status=self.status;sequence=self.state_sequence
+            traces=list(self.trace_queue);self.trace_queue.clear()
+        for row in traces:
+            self.trace_pub.publish(String(data=json.dumps(json_safe(row),allow_nan=False)))
         self.status_pub.publish(String(data=status))
         if state is None or sequence==self.published_sequence or time.monotonic()-state[2]>self.cfg['feedback_timeout']: return
         self.published_sequence=sequence
@@ -118,20 +154,24 @@ class UrRtdeBridge(Node):
                 self.get_logger().info('RTDE Control connected')
             session=JointServoSession(control,self.velocity_limits,self.cfg['joint_lower_limits'],
                                       self.cfg['joint_upper_limits'],self.cfg['max_joint_tracking_error'],
-                                      self.cfg['lookahead_time'],self.cfg['gain'],self.cfg['joint_continuous'])
+                                      self.cfg['lookahead_time'],self.cfg['gain'],self.cfg['joint_continuous'],
+                                      self.cfg['lead_soft_start'],self.cfg['lead_soft_limit'])
             dt=1/self.cfg['frequency'];last_stamp=None;last_fresh=time.monotonic();last_cycle=None
             missed_cycle_limit=4*dt
             previous_timings={}
+            trace_sequence=0;last_sent_q=None
             self.get_logger().info(
                 f'RTDE servoJ: {self.cfg["frequency"]:.1f}Hz; '
                 f'joint velocity limits={self.velocity_limits}; preview={control is None}')
             while not self.stopping.is_set():
                 cycle=time.monotonic()
+                cycle_interval=None if last_cycle is None else cycle-last_cycle
+                tracing=self.get_parameter('publish_diagnostics').value
                 timings={}
-                period=control.initPeriod() if control else None
+                period=control.initPeriod() if control and self.execution_fault is None else None
                 timings['initPeriod']=time.monotonic()-cycle
                 started=time.monotonic()
-                if not receive.isConnected() or (control and not control.isConnected()):
+                if not receive.isConnected() or (control and self.execution_fault is None and not control.isConnected()):
                     raise RuntimeError('RTDE disconnected')
                 stamp=receive.getTimestamp()
                 if not math.isfinite(stamp): raise RuntimeError('Invalid RTDE timestamp')
@@ -153,7 +193,29 @@ class UrRtdeBridge(Node):
                     target_velocity=self.target_velocity
                 ready=(receive.getSafetyMode()==1 and receive.getRobotMode()==7)
                 timings['feedback_and_state']=time.monotonic()-started
-                if control and not ready:
+                trace=None
+                if tracing:
+                    with self.lock: servo_status,servo_status_time=self.servo_status
+                    trace={'schema':1,'ros_ns':self.get_clock().now().nanoseconds,
+                           'monotonic_s':cycle,'rtde_timestamp_s':stamp,
+                           'feedback_age_s':cycle-last_fresh,'cycle_interval_s':cycle_interval,
+                           'q_actual':list(joints),'qd_actual':list(velocities),
+                           'q_reference_before':session.command,'q_servo_hint':target,
+                           'qd_servo':target_velocity if target is not None else None,
+                           'servo_status':servo_status,
+                           'servo_status_age_s':None if servo_status_time is None else cycle-servo_status_time,
+                           'trajectory_age_s':age if target is not None else None,
+                           'active':active,'preview':control is None,
+                           'config':{key:self.cfg[key] for key in ('frequency','lookahead_time','gain',
+                                                                  'max_joint_tracking_error','lead_soft_start',
+                                                                  'lead_soft_limit')}}
+                    for name in ('getRuntimeState','getRobotMode','getSafetyMode','getSpeedScaling',
+                                 'getTargetSpeedFraction','getTargetQ','getTargetQd'):
+                        try: trace[name]=getattr(receive,name)()
+                        except Exception as exc: trace[name]=str(exc)
+                if self.execution_fault is not None:
+                    target=None
+                elif control and not ready:
                     session.stop();self.trip('ROBOT_NOT_READY_RELEASE_TO_REARM');target=None
                 elif active and (heartbeat_age>self.cfg['command_timeout'] or
                        (target is None and arm_age>self.cfg['command_timeout']) or
@@ -171,20 +233,65 @@ class UrRtdeBridge(Node):
                         f'current cycle before stop: {current}; '
                         f'target_age={age*1000:.2f}ms, heartbeat_age={heartbeat_age*1000:.2f}ms')
                 started=time.monotonic()
-                session.step_velocity(joints,target,target_velocity,dt)
+                command=None
+                try:
+                    # Recheck the asynchronous latch before using a cached target.
+                    with self.lock:
+                        if self.servo_halt_latched: target=None
+                    command=session.step_velocity(joints,target,target_velocity,dt)
+                except ValueError as exc:
+                    # Command validation is recoverable. Keep Receive running
+                    # so a stopped arm still supplies actual TCP/Q and can rearm.
+                    session.stop()
+                    self.trip('COMMAND_REJECTED_RELEASE_TO_REARM: '+str(exc))
+                    self.get_logger().error(str(exc))
+                    target=None
+                except RuntimeError as exc:
+                    # A failed execution must never resume on a clutch edge.
+                    # Keep the independent Receive connection for diagnosis.
+                    status='EXECUTION_FAULT_RESTART_REQUIRED: '+str(exc)
+                    with self.lock: self.execution_fault=status
+                    self.trip(status)
+                    snapshot={'actual_q': joints, 'requested_qd': target_velocity}
+                    for method in ('getRuntimeState','getRobotMode','getSafetyMode',
+                                   'getSpeedScaling','getTargetSpeedFraction','getActualQd'):
+                        try: snapshot[method]=getattr(receive,method)()
+                        except Exception as diagnostic_error: snapshot[method]=str(diagnostic_error)
+                    self.get_logger().error(status+'; feedback='+json.dumps(snapshot))
+                    try: session.stop()
+                    except Exception as stop_error: self.get_logger().error('Stop failed: '+str(stop_error))
+                    target=None
                 timings['session_step_total']=time.monotonic()-started
                 with self.lock:
-                    if not self.faulted:
+                    if self.execution_fault is not None:
+                        self.status=self.execution_fault
+                    elif self.servo_halt_latched:
+                        self.status=f'SERVO_HALT_RELEASE_TO_REARM: status={self.servo_halt_code}'
+                    elif not self.faulted:
                         self.status=('TRACKING' if control else 'PREVIEW') if target else 'IDLE'
                     elif not active and self.released: self.status='READY_RELEASED' if control else 'PREVIEW_RELEASED'
+                    trace_status=self.status
+                if command is not None and control is not None:
+                    last_sent_q=list(command)
                 last_cycle=cycle
                 timings['before_wait_total']=time.monotonic()-cycle
                 started=time.monotonic()
-                if control: control.waitPeriod(period)
+                if control and self.execution_fault is None: control.waitPeriod(period)
                 else: self.stopping.wait(max(0.,dt-(time.monotonic()-cycle)))
-                timings['waitPeriod' if control else 'preview_wait']=time.monotonic()-started
+                timings['waitPeriod' if control and self.execution_fault is None else 'feedback_wait']=time.monotonic()-started
                 timings['cycle_total']=time.monotonic()-cycle
                 previous_timings=timings
+                if trace is not None:
+                    trace_sequence+=1
+                    trace.update(sequence=trace_sequence,status=trace_status,
+                                 q_cmd=command,q_last_sent=last_sent_q,
+                                 anti_windup_scale=session.last_velocity_scale,
+                                 command_sent=command is not None and control is not None,
+                                 timings_s=timings)
+                    with self.lock:
+                        if len(self.trace_queue)==self.trace_queue.maxlen: self.trace_dropped+=1
+                        trace['diagnostics_dropped']=self.trace_dropped
+                        self.trace_queue.append(trace)
         except Exception as exc:
             self.trip('FAULT: '+str(exc));self.get_logger().error(str(exc))
         finally:

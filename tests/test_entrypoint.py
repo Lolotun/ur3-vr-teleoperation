@@ -35,6 +35,8 @@ class EntrypointTests(unittest.TestCase):
                 self.assertEqual(args[:3], ['launch', 'teleop_core', 'rtde_real.launch.py'])
                 self.assertFalse(any(arg.startswith('kinematics_params_file:=') for arg in args))
                 self.assertFalse(any(arg.endswith(':=') for arg in args))
+                self.assertIn('lead_soft_start:=0.06', args)
+                self.assertIn('lead_soft_limit:=0.10', args)
 
     def test_explicit_calibration_and_tcp_vectors_are_single_arguments(self):
         args = self.arguments('/robot calibration/ur3.yaml')

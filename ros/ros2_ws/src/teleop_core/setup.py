@@ -29,6 +29,7 @@ setup(
             "relative_pose_controller = teleop_core.relative_pose_controller:main",
             "pose_tracking_controller = teleop_core.pose_tracking_controller:main",
             "ur_rtde_bridge = teleop_core.ur_rtde_bridge:main",
+            "rtde_diagnostics = teleop_core.rtde_diagnostics:main",
             "tcp_actual_publisher = teleop_core.tcp_actual_publisher:main",
         ],
     },

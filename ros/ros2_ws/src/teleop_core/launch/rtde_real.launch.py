@@ -100,6 +100,7 @@ def launch_nodes(context):
             **common, **execution_limits, 'robot_ip': value('robot_ip', str),
             'enable_motion': value('enable_motion', str).lower() == 'true',
             **{name: value(name) for name in ['trajectory_timeout', 'max_joint_tracking_error',
+                                             'lead_soft_start', 'lead_soft_limit',
                                              'lookahead_time', 'gain']}}]),
         Node(package='teleop_core', executable='robotiq_gripper_bridge',
              condition=IfCondition(LaunchConfiguration('enable_gripper')), output='screen', parameters=[{
@@ -117,6 +118,7 @@ def generate_launch_description():
                 'position_gain': '2.0', 'rotation_gain': '2.0',
                 'command_timeout': '0.25', 'feedback_timeout': '0.25', 'trajectory_timeout': '0.1',
                 'max_joint_tracking_error': '0.15', 'lookahead_time': '0.1', 'gain': '300.0',
+                'lead_soft_start': '0.06', 'lead_soft_limit': '0.10',
                 'kinematics_params_file': '', 'tcp_xyz': '[0.0, 0.0, 0.0]', 'tcp_rpy': '[0.0, 0.0, 0.0]',
                 'lower_singularity_threshold': '17.0', 'hard_stop_singularity_threshold': '30.0'}
     return LaunchDescription([DeclareLaunchArgument(k, default_value=v) for k, v in defaults.items()]

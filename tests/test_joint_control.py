@@ -76,6 +76,17 @@ class JointControlTests(unittest.TestCase):
         self.assertEqual(self.control.stops, 1)
         self.assertEqual(self.session.step([1.] * 6, [1.] * 6, .008), (1.,) * 6)
 
+    def test_tracking_rejection_identifies_worst_joint_and_resets_reference(self):
+        self.session.step([0.] * 6, [.001] * 6, .008)
+        target = [.001, .001, -.2, .001, .001, .001]
+        with self.assertRaisesRegex(
+                ValueError, r'Joint target too far from feedback: joint=elbow_joint '
+                r'actual=0\.000000rad command=-0\.200000rad '
+                r'delta=-0\.200000rad limit=0\.150000rad'):
+            self.session.step([0.] * 6, target, .008)
+        self.assertIsNone(self.session.command)
+        self.assertEqual(self.control.stops, 1)
+
     def test_nonfinite_and_rejected_commands_stop(self):
         self.control.accept = False
         with self.assertRaises(RuntimeError):
@@ -122,16 +133,57 @@ class JointControlTests(unittest.TestCase):
         self.assertAlmostEqual(measured_velocity, desired_velocity, places=6)
         self.assertGreater(actual[0], .035)
 
-    def test_velocity_reference_stops_on_frozen_feedback_and_cannot_wind_up(self):
+    def test_velocity_reference_limits_frozen_feedback_without_a_hard_trip(self):
         actual = (0.,) * 6
-        count = 0
-        with self.assertRaises(ValueError):
-            for _ in range(300):
-                self.session.step_velocity(actual, [.008] * 6, [1.] * 6, .008)
-                count += 1
-        self.assertLess(count, 20)
+        for _ in range(1500):
+            command = self.session.step_velocity(actual, [.008] * 6, [1.] * 6, .008)
+            self.assertLessEqual(max(abs(q) for q in command), .10 + 1e-12)
+        self.assertGreater(command[0], .09)
+        self.assertLess(self.session.last_velocity_scale, .001)
+        self.assertEqual(self.control.stops, 0)
+        # Reversing toward actual is allowed immediately, at full input speed.
+        previous = command
+        command = self.session.step_velocity(actual, [-.004] * 6, [-.5] * 6, .008)
+        self.assertAlmostEqual(command[0] - previous[0], -.004)
+        self.assertEqual(self.session.last_velocity_scale, 1.)
+
+    def test_antiwindup_scales_whole_vector_and_preserves_hard_guard(self):
+        actual = [0.] * 6
+        self.session.command = (.08, 0., 0., 0., 0., 0.)
+        command = self.session.step_velocity(actual, [.001] * 6, [.8, .2, 0., 0., 0., 0.], .008)
+        self.assertAlmostEqual(self.session.last_velocity_scale, .5)
+        self.assertAlmostEqual(command[0] - .08, .0032)
+        self.assertAlmostEqual(command[1], .0008)
+        actual[0] = -.2
+        with self.assertRaisesRegex(ValueError, 'Joint tracking error'):
+            self.session.step_velocity(actual, actual, [0.] * 6, .008)
         self.assertIsNone(self.session.command)
         self.assertEqual(self.control.stops, 1)
+
+    def test_antiwindup_validation_and_retreat_from_externally_increased_lead(self):
+        for start, limit in [(0., .1), (.1, .1), (.1, .2), (float('nan'), .1)]:
+            with self.assertRaises(ValueError):
+                JointServoSession(None, [1.] * 6, [-math.pi] * 6, [math.pi] * 6,
+                                  lead_soft_start=start, lead_soft_limit=limit)
+        self.session.command = (.12,) * 6
+        self.assertEqual(self.session.step_velocity([0.] * 6, [.001] * 6, [.5] * 6, .008), (.12,) * 6)
+        retreat = self.session.step_velocity([0.] * 6, [-.001] * 6, [-.5] * 6, .008)
+        for value in retreat:
+            self.assertAlmostEqual(value, .116)
+
+    def test_antiwindup_follows_slow_plant_and_changes_direction_without_trip(self):
+        actual = (0.,) * 6
+        previous_command = actual
+        for velocity, count in [(1., 250), (-1., 250)]:
+            for _ in range(count):
+                hint = tuple(a + velocity * .008 for a in actual)
+                command = self.session.step_velocity(actual, hint, [velocity] * 6, .008)
+                self.assertLessEqual(max(abs(q - a) for q, a in zip(command, actual)), .1 + 1e-12)
+                self.assertLessEqual(max(abs(q - p) for q, p in zip(command, previous_command)), .008 + 1e-12)
+                actual = tuple(a + .008 / .145 * (q - a) for a, q in zip(actual, command))
+                previous_command = command
+        self.assertEqual(self.control.stops, 0)
+        self.assertLess(actual[0], .2)
 
     def test_velocity_reference_halts_resets_and_reanchors(self):
         command = self.session.step_velocity([0.] * 6, [.001] * 6, [.1] * 6, .008)

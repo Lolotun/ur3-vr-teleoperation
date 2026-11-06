@@ -32,6 +32,8 @@ case "${1:-wifi_speedl}" in
       position_gain:=${RTDE_POSITION_GAIN:-2.0} \
       rotation_gain:=${RTDE_ROTATION_GAIN:-2.0} \
       max_joint_tracking_error:=${RTDE_MAX_JOINT_TRACKING_ERROR:-0.15} \
+      lead_soft_start:=${RTDE_LEAD_SOFT_START:-0.06} \
+      lead_soft_limit:=${RTDE_LEAD_SOFT_LIMIT:-0.10} \
       "${calibration_args[@]}" \
       "tcp_xyz:=${RTDE_TCP_XYZ:-[0.0, 0.0, 0.0]}" \
       "tcp_rpy:=${RTDE_TCP_RPY:-[0.0, 0.0, 0.0]}" \

@@ -68,6 +68,9 @@ class Receive:
     def getActualQd(self): return list(shared['qd'])
     def getSafetyMode(self): return 1
     def getRobotMode(self): return 7
+    def getRuntimeState(self): return 2
+    def getSpeedScaling(self): return 1.
+    def getTargetSpeedFraction(self): return .78
     def disconnect(self): pass
 
 
@@ -81,6 +84,10 @@ class Control:
     def waitPeriod(self, start): time.sleep(max(0., .008 - (time.monotonic() - start)))
     def servoJ(self, q, speed, acceleration, dt, lookahead, gain):
         self.calls.append(list(q))
+        if shared.get('reject_servoj', False):
+            return False
+        if shared.get('freeze_plant', False):
+            return True  # Feedback is fresh, but the plant cannot follow commands.
         # A finite position response exposes feedback-reset attenuation that
         # an instantly following fake robot cannot detect.
         alpha = min(1., dt / .1)
@@ -118,7 +125,8 @@ class Integration(unittest.TestCase):
         spec.loader.exec_module(launch)
         self.model, _ = launch.robot_parameters(tcp_xyz=(.0, .0, .1))
         shared.update(model=ForwardModel(self.model['robot_description']), q=list(DEFAULT_SEED),
-                      qd=[0.] * 6, controls=[], freeze=False, stamp=0.)
+                      qd=[0.] * 6, controls=[], freeze=False, freeze_plant=False,
+                      reject_servoj=False, stamp=0.)
         self.initial = shared['model'].tcp(shared['q'])
         self.temp = tempfile.TemporaryDirectory()
         servo = yaml.safe_load((Path(get_package_share_directory('teleop_core')) /
@@ -221,7 +229,21 @@ class Integration(unittest.TestCase):
             else:
                 self.assertFalse(shared['controls'])
                 self.assertEqual(shared['q'], DEFAULT_SEED)
-            if failure == 'servo':
+            rearm_pose = None
+            if failure == 'servo_halt':
+                # Inject the protective event without moving the fake robot
+                # into a singularity. Subsequent real Servo status 0 must not
+                # restore either the old joint reference or old VR anchor.
+                relative.on_servo_status(Int8(data=2))
+                bridge.on_servo_status(Int8(data=2))
+                pump(.1, True, .08, angle=.2)
+                count = len(control.calls)
+                pump(.2, True, .08, angle=.2)
+                self.assertEqual(len(control.calls), count, 'Held operator resumed after Servo halt')
+                self.assertIsNone(relative.core.anchors)
+                self.assertTrue(bridge.servo_halt_latched)
+                rearm_pose = shared['model'].tcp(shared['q'])
+            elif failure == 'servo':
                 # Freeze output while tracker and VR heartbeat continue.
                 import os, signal
                 os.killpg(self.servo.pid, signal.SIGSTOP)
@@ -242,6 +264,12 @@ class Integration(unittest.TestCase):
             pump(.3, True, .02)
             if motion:
                 self.assertGreater(len(control.calls), count, bridge.status)
+            if rearm_pose is not None:
+                self.assertIsNotNone(tracker.target)
+                displacement, rotation = distance(tracker.target, rearm_pose)
+                self.assertLess(displacement, .001)
+                self.assertLess(rotation, .001)
+                self.assertFalse(bridge.servo_halt_latched)
             shared['freeze'] = True
             pump(.35, True, .02)
             self.assertIn('feedback stopped', bridge.status)
@@ -254,8 +282,143 @@ class Integration(unittest.TestCase):
             rclpy.shutdown()
 
     def test_preview_with_real_servo(self): self.run_mode(False)
+
+    def test_tracking_rejection_keeps_feedback_and_requires_release(self):
+        self.check_bridge_rejection(execution_failure=False)
+
+    def test_servoj_rejection_keeps_feedback_and_cannot_rearm(self):
+        self.check_bridge_rejection(execution_failure=True)
+
+    def test_servo_halt_discards_reference_and_requires_physical_release(self):
+        self.check_bridge_rejection(execution_failure=False, servo_halt=True)
+
+    def check_bridge_rejection(self, execution_failure, servo_halt=False):
+        # Feed bounded Servo-shaped commands directly to isolate bridge recovery.
+        # The real Servo process is not started for this test.
+        from sensor_msgs.msg import JointState
+        from trajectory_msgs.msg import JointTrajectoryPoint
+        rclpy.init(args=['--ros-args', '-p', 'robot_ip:=mock', '-p', 'enable_motion:=true'])
+        shared['freeze_plant'] = True
+        shared['reject_servoj'] = execution_failure
+        bridge = UrRtdeBridge()
+        source = rclpy.create_node('tracking_rejection_source')
+        from rclpy.parameter import Parameter
+        bridge.set_parameters([Parameter('publish_diagnostics', value=True)])
+        executor = SingleThreadedExecutor()
+        executor.add_node(bridge)
+        executor.add_node(source)
+        active = source.create_publisher(Bool, '/teleop/servo/active', 1)
+        operator = source.create_publisher(Bool, '/vr/right_hand/active', 1)
+        servo_status = source.create_publisher(Int8, '/teleop/servo/status', 1)
+        commands = source.create_publisher(JointTrajectory, '/teleop/servo/joint_trajectory', 1)
+        feedback, poses = [], []
+        traces = []
+        source.create_subscription(String, '/teleop/rtde_diagnostics',
+                                   lambda msg: traces.append(json.loads(msg.data)), 1000)
+        source.create_subscription(JointState, '/joint_states', feedback.append, 10)
+        source.create_subscription(PoseStamped, '/teleop/tcp_actual', poses.append, 10)
+        recorder = None
+        trace_path = Path(self.temp.name) / 'execution_trace.jsonl'
+        if execution_failure:
+            recorder = subprocess.Popen(
+                [sys.executable, '-m', 'teleop_core.rtde_diagnostics',
+                 '--output', str(trace_path), '--duration', '1.5'],
+                stdout=self.log, stderr=self.log)
+
+        def pump(seconds, held=False, speed=1., status=0, physical_held=None):
+            end = time.monotonic() + seconds
+            next_send = 0.
+            while time.monotonic() < end:
+                if time.monotonic() >= next_send:
+                    next_send = time.monotonic() + .008
+                    active.publish(Bool(data=held))
+                    operator.publish(Bool(data=held if physical_held is None else physical_held))
+                    servo_status.publish(Int8(data=status))
+                    message = JointTrajectory()
+                    message.joint_names = list(UR3_ARM_JOINTS)
+                    point = JointTrajectoryPoint()
+                    point.positions = list(shared['q'])
+                    point.positions[0] += speed * .008
+                    point.velocities = [speed, 0., 0., 0., 0., 0.]
+                    point.time_from_start.nanosec = 8_000_000
+                    message.points = [point]
+                    commands.publish(message)
+                executor.spin_once(timeout_sec=.001)
+
+        try:
+            pump(.4)
+            if not execution_failure:
+                pump(.8, held=True)
+                self.assertEqual(bridge.status, 'TRACKING')
+                self.assertTrue(all(abs(q - a) <= .1 + 1e-12
+                                    for q, a in zip(shared['controls'][0].calls[-1], shared['q'])))
+                self.assertEqual(shared['controls'][0].stops, 0)
+                if servo_halt:
+                    pump(.08, held=True, status=2)
+                else:
+                    # Unexpected actual displacement still trips the hard guard;
+                    # ordinary integration against a frozen plant no longer does.
+                    shared['q'][0] -= .25
+            deadline = time.monotonic() + 2
+            expected = ('EXECUTION_FAULT_RESTART_REQUIRED' if execution_failure else
+                        'SERVO_HALT_RELEASE_TO_REARM' if servo_halt else 'COMMAND_REJECTED_RELEASE_TO_REARM')
+            while not bridge.status.startswith(expected) and time.monotonic() < deadline:
+                pump(.03, held=True)
+            self.assertIn(expected, bridge.status)
+            if execution_failure:
+                self.assertIn('servoJ rejected: command=', bridge.status)
+            elif not servo_halt:
+                self.assertIn('Joint tracking error', bridge.status)
+                self.assertIn('joint=shoulder_pan_joint', bridge.status)
+                self.assertIn('limit=0.150000rad', bridge.status)
+            control = shared['controls'][0]
+            self.assertGreater(control.stops, 0)
+            sent, received, tcp_received = len(control.calls), len(feedback), len(poses)
+            pump(.35, held=True)
+            self.assertEqual(len(control.calls), sent, 'Held clutch resumed rejected commands')
+            self.assertGreater(len(feedback), received + 10)
+            self.assertGreater(len(poses), tcp_received + 10)
+            self.assertTrue(bridge.worker.is_alive(), bridge.status)
+            self.assertLess(time.monotonic() - bridge.state[2], .1)
+            self.assertGreater(len(traces), 10)
+            sent_traces = [row for row in traces if row['command_sent']]
+            if not execution_failure:
+                self.assertTrue(sent_traces)
+            for row in sent_traces:
+                self.assertIn(row['q_cmd'], control.calls)
+                self.assertIn(tuple(row['q_actual']), (tuple(DEFAULT_SEED), tuple(shared['q'])))
+                self.assertEqual(row['getSpeedScaling'], 1.)
+            self.assertTrue(any(row['status'].startswith(expected) for row in traces))
+            self.assertTrue(all(row['q_cmd'] is None for row in traces if row['status'].startswith(expected)))
+            if servo_halt:
+                pump(.1, held=False, speed=0., physical_held=True)
+                pump(.1, held=True, speed=0., physical_held=True)
+                self.assertEqual(len(control.calls), sent, 'Derived active=false cleared a Servo halt')
+            shared['reject_servoj'] = False
+            pump(.1, held=False, speed=0.)
+            pump(.2, held=True, speed=0.)
+            if execution_failure:
+                self.assertEqual(len(control.calls), sent, 'Execution fault resumed after clutch release')
+                self.assertIn('EXECUTION_FAULT_RESTART_REQUIRED', bridge.status)
+                self.assertEqual(recorder.wait(timeout=5), 0)
+                events = [json.loads(line) for line in trace_path.read_text().splitlines()]
+                self.assertTrue(any(event.get('topic') == '/teleop/rtde_diagnostics' for event in events))
+                self.assertTrue(any(event.get('topic') == '/teleop/servo/joint_trajectory' for event in events))
+            else:
+                self.assertGreater(len(control.calls), sent, bridge.status)
+                self.assertEqual(bridge.status, 'TRACKING')
+                self.assertTrue(all(abs(a - b) < 1e-9 for a, b in zip(control.calls[-1], shared['q'])))
+        finally:
+            if recorder is not None and recorder.poll() is None:
+                recorder.terminate()
+                recorder.wait(timeout=5)
+            executor.shutdown()
+            bridge.destroy_node()
+            source.destroy_node()
+            rclpy.shutdown()
     def test_motion_with_real_servo_and_fake_rtde(self): self.run_mode(True)
     def test_servo_loss_requires_release(self): self.run_mode(True, failure='servo')
+    def test_servo_halt_reanchors_vr_target(self): self.run_mode(True, failure='servo_halt')
 
 
 if __name__ == '__main__':
