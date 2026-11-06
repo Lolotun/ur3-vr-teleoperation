@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-humble-geometry-msgs \
     ros-humble-moveit-servo \
     ros-humble-moveit-kinematics \
+    ros-humble-moveit-ros-planning \
     ros-humble-rcl-interfaces \
     ros-humble-robot-state-publisher \
     ros-humble-sensor-msgs \
@@ -34,6 +35,7 @@ RUN mkdir -p src && \
     git -C src/ROS-TCP-Endpoint checkout --detach ${ROS_TCP_ENDPOINT_REV}
 
 COPY ros2_ws/src/teleop_core src/teleop_core
+COPY ros2_ws/src/teleop_collision src/teleop_collision
 RUN /bin/bash -c "source /opt/ros/humble/setup.bash && colcon build --symlink-install"
 
 COPY scripts/entrypoint.sh /entrypoint.sh

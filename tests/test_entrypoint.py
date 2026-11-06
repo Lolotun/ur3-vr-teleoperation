@@ -37,6 +37,7 @@ class EntrypointTests(unittest.TestCase):
                 self.assertFalse(any(arg.endswith(':=') for arg in args))
                 self.assertIn('lead_soft_start:=0.06', args)
                 self.assertIn('lead_soft_limit:=0.10', args)
+                self.assertIn('floor_z:=-0.01', args)
 
     def test_explicit_calibration_and_tcp_vectors_are_single_arguments(self):
         args = self.arguments('/robot calibration/ur3.yaml')

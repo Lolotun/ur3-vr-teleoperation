@@ -110,6 +110,9 @@ from std_msgs.msg import Bool, String, Int8
 from std_srvs.srv import Trigger
 from geometry_msgs.msg import PoseStamped, TwistStamped
 from trajectory_msgs.msg import JointTrajectory
+from sensor_msgs.msg import JointState
+from moveit_msgs.msg import PlanningScene
+from moveit_msgs.srv import GetStateValidity
 from ament_index_python.packages import get_package_share_directory
 from teleop_core.relative_pose_controller import RelativePoseController
 from teleop_core.pose_tracking_controller import PoseTrackingController
@@ -137,17 +140,26 @@ class Integration(unittest.TestCase):
         self.servo = subprocess.Popen(['ros2', 'run', 'moveit_servo', 'servo_node_main',
                                       '--ros-args', '--params-file', str(params)],
                                      stdout=self.log, stderr=subprocess.STDOUT, start_new_session=True)
+        scene = yaml.safe_load((Path(get_package_share_directory('teleop_core')) /
+                                'config/collision_scene.yaml').read_text())
+        scene.pop('check_self_collisions', None)  # Consumed by model construction in production launch.
+        guard_params = Path(self.temp.name) / 'guard.yaml'
+        guard_params.write_text(yaml.safe_dump({'/**': {'ros__parameters': {**self.model, **scene}}}))
+        self.guard = subprocess.Popen(['ros2', 'run', 'teleop_collision', 'collision_guard',
+                                      '--ros-args', '--params-file', str(guard_params)],
+                                     stdout=self.log, stderr=subprocess.STDOUT, start_new_session=True)
 
     def tearDown(self):
         import os
         import signal
-        if self.servo.poll() is None:
-            os.killpg(self.servo.pid, signal.SIGINT)
-            try:
-                self.servo.wait(timeout=8)
-            except subprocess.TimeoutExpired:
-                os.killpg(self.servo.pid, signal.SIGKILL)
-                self.servo.wait(timeout=3)
+        for process in (self.servo, self.guard):
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGINT)
+                try:
+                    process.wait(timeout=8)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait(timeout=3)
         self.log.seek(0)
         log = self.log.read()
         if self.servo.returncode not in (0, -2):
@@ -243,14 +255,15 @@ class Integration(unittest.TestCase):
                 self.assertIsNone(relative.core.anchors)
                 self.assertTrue(bridge.servo_halt_latched)
                 rearm_pose = shared['model'].tcp(shared['q'])
-            elif failure == 'servo':
+            elif failure in ('servo', 'guard'):
                 # Freeze output while tracker and VR heartbeat continue.
                 import os, signal
-                os.killpg(self.servo.pid, signal.SIGSTOP)
+                process = self.servo if failure == 'servo' else self.guard
+                os.killpg(process.pid, signal.SIGSTOP)
                 pump(.25, True, .02)
-                self.assertIn('STALE_COMMAND', bridge.status)
+                self.assertIn('STALE_COMMAND' if failure == 'servo' else 'COLLISION_GUARD_TIMEOUT', bridge.status)
                 count = len(control.calls)
-                os.killpg(self.servo.pid, signal.SIGCONT)
+                os.killpg(process.pid, signal.SIGCONT)
                 pump(.25, True, .02)
                 self.assertEqual(count, len(control.calls), 'Servo restart resumed while held')
             else:
@@ -418,7 +431,110 @@ class Integration(unittest.TestCase):
             rclpy.shutdown()
     def test_motion_with_real_servo_and_fake_rtde(self): self.run_mode(True)
     def test_servo_loss_requires_release(self): self.run_mode(True, failure='servo')
+    def test_collision_guard_loss_requires_release(self): self.run_mode(True, failure='guard')
     def test_servo_halt_reanchors_vr_target(self): self.run_mode(True, failure='servo_halt')
+
+
+    def test_real_geometry_floor_and_self_collision(self):
+        import random
+        rclpy.init()
+        node = rclpy.create_node('collision_geometry_test')
+        publisher = node.create_publisher(JointState, '/joint_states', 10)
+        client = node.create_client(GetStateValidity, '/teleop/check_state_validity')
+        scenes = []
+        guard_status = []
+        node.create_subscription(PlanningScene, '/planning_scene', scenes.append, 10)
+        node.create_subscription(String, '/teleop/collision_status', lambda msg: guard_status.append(msg.data), 10)
+        q = list(DEFAULT_SEED)
+
+        def pump(seconds):
+            end = time.monotonic() + seconds
+            while time.monotonic() < end:
+                message = JointState()
+                message.header.stamp = node.get_clock().now().to_msg()
+                message.name = list(UR3_ARM_JOINTS)
+                message.position = list(q)
+                message.velocity = [0.] * 6
+                publisher.publish(message)
+                rclpy.spin_once(node, timeout_sec=.005)
+
+        def check(position, actual_position=None):
+            nonlocal q
+            q = list(position if actual_position is None else actual_position)
+            pump(.06)
+            request = GetStateValidity.Request()
+            request.group_name = 'manipulator'
+            request.robot_state.joint_state.name = list(UR3_ARM_JOINTS)
+            request.robot_state.joint_state.position = list(position)
+            future = client.call_async(request)
+            end = time.monotonic() + 2
+            while not future.done() and time.monotonic() < end:
+                pump(.005)
+            self.assertTrue(future.done(), 'Collision guard did not respond')
+            return future.result()
+
+        try:
+            end = time.monotonic() + 10
+            while not client.service_is_ready() and time.monotonic() < end:
+                self.assertIsNone(self.guard.poll(), 'Collision guard exited')
+                pump(.05)
+            self.assertTrue(client.service_is_ready())
+            pump(1.1)
+            self.assertTrue(check(DEFAULT_SEED).valid, 'Expected clear seed pose')
+            floor = [obj for scene in scenes for obj in scene.world.collision_objects if obj.id == 'teleop_floor']
+            self.assertTrue(floor, 'Floor was not published to planning scene')
+            box, pose = floor[-1].primitives[0], floor[-1].primitive_poses[0]
+            self.assertAlmostEqual(pose.position.z + box.dimensions[2] / 2, -.01)
+            blocked = check([0., math.pi / 2, 0., 0., math.pi / 2, 0.])
+            self.assertFalse(blocked.valid)
+            self.assertTrue(any('teleop_floor' in (c.contact_body_1, c.contact_body_2) for c in blocked.contacts))
+            rng = random.Random(12)
+            found_self = None
+            for _ in range(100):
+                position = [0., rng.uniform(-2.5, -.3), rng.uniform(-2.9, 2.9),
+                            rng.uniform(-3., 3.), rng.uniform(-3., 3.), 0.]
+                result = check(position)
+                if not result.valid and result.contacts and all(
+                        'teleop_floor' not in (c.contact_body_1, c.contact_body_2) for c in result.contacts):
+                    found_self = result
+                    break
+            self.assertIsNotNone(found_self, 'Expected a detected self-collision in sampled folded poses')
+
+            # Find the first contact along a one-joint sweep. Bisection leaves
+            # a non-intersecting pose just inside the configured clearance band.
+            clear = list(DEFAULT_SEED)
+            contact = None
+            for i in range(1, 35):
+                candidate = list(DEFAULT_SEED)
+                candidate[1] += .1 * i
+                result = check(candidate)
+                if not result.valid and result.contacts:
+                    contact = candidate
+                    break
+                self.assertTrue(result.valid, 'Unexpected non-geometric rejection during sweep')
+                clear = candidate
+            self.assertIsNotNone(contact, 'Expected a contact boundary in shoulder sweep')
+            for _ in range(9):
+                middle = [(a + b) / 2 for a, b in zip(clear, contact)]
+                if check(middle).valid:
+                    clear = middle
+                else:
+                    contact = middle
+            near = list(clear)
+            self.assertTrue(check(near).valid, 'Holding a non-intersecting close pose must be allowed')
+            pump(.01)
+            self.assertEqual(guard_status[-1], 'HOLDING_IN_PROXIMITY')
+            retreat = list(near)
+            retreat[1] -= .02
+            self.assertTrue(check(retreat, actual_position=near).valid, 'Retreat must improve an existing small gap')
+            pump(.01)
+            self.assertEqual(guard_status[-1], 'RETREATING_FROM_PROXIMITY')
+            deeper = list(near)
+            deeper[1] += .002
+            self.assertFalse(check(deeper, actual_position=near).valid, 'Approaching the nearby obstacle must stay blocked')
+        finally:
+            node.destroy_node()
+            rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

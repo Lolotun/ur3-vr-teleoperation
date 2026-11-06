@@ -185,6 +185,23 @@ class JointControlTests(unittest.TestCase):
         self.assertEqual(self.control.stops, 0)
         self.assertLess(actual[0], .2)
 
+    def test_collision_veto_prevents_first_command_and_stops_existing_reference(self):
+        allowed = [False]
+        self.session.command_check = lambda actual, command: allowed[0]
+        with self.assertRaisesRegex(ValueError, 'Collision guard rejected'):
+            self.session.step_velocity([0.] * 6, [.001] * 6, [.1] * 6, .008)
+        self.assertFalse(self.control.sent)
+        self.assertIsNone(self.session.command)
+        allowed[0] = True
+        self.session.step_velocity([0.] * 6, [.001] * 6, [.1] * 6, .008)
+        sent = len(self.control.sent)
+        allowed[0] = False
+        with self.assertRaisesRegex(ValueError, 'Collision guard rejected'):
+            self.session.step_velocity([0.] * 6, [.001] * 6, [.1] * 6, .008)
+        self.assertEqual(len(self.control.sent), sent)
+        self.assertEqual(self.control.stops, 1)
+        self.assertIsNone(self.session.command)
+
     def test_velocity_reference_halts_resets_and_reanchors(self):
         command = self.session.step_velocity([0.] * 6, [.001] * 6, [.1] * 6, .008)
         self.assertEqual(self.session.step_velocity(command, command, [0.] * 6, .008), command)

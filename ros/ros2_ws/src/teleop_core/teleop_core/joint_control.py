@@ -43,7 +43,7 @@ class JointServoSession:
     """Maintain a continuous servoJ reference with bounded lead over actual Q."""
     def __init__(self, control, velocity_limits, lower_limits, upper_limits,
                  tracking_limit=.15, lookahead=.1, gain=300., continuous=(False,) * 6,
-                 lead_soft_start=.06, lead_soft_limit=.10):
+                 lead_soft_start=.06, lead_soft_limit=.10, command_check=None):
         self.control = control
         self.velocity_limits = joint_vector(velocity_limits)
         self.lower_limits = joint_vector(lower_limits)
@@ -64,6 +64,7 @@ class JointServoSession:
         self.lead_soft_start = lead_soft_start
         self.lead_soft_limit = lead_soft_limit
         self.last_velocity_scale = 1.
+        self.command_check = command_check
         self.lookahead = lookahead
         self.gain = gain
         self.command = None
@@ -178,6 +179,8 @@ class JointServoSession:
             if any(not continuous and (q < lo or q > hi) for q, lo, hi, continuous in
                    zip(command, self.lower_limits, self.upper_limits, self.continuous)):
                 raise ValueError('Joint command outside position limits')
+            if self.command_check is not None and not self.command_check(actual, command):
+                raise ValueError('Collision guard rejected command path')
             self.command = command
             if self.control is not None:
                 if not self.control.servoJ(list(command), 0., 0., dt, self.lookahead, self.gain):

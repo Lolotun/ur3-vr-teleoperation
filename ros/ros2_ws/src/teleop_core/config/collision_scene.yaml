@@ -1,0 +1,20 @@
+# Distances are meters in the official robot model; Z is up.
+move_group_name: manipulator
+joint_topic: /joint_states
+# Applies to both Servo and the command-path guard via their shared SRDF.
+# Floor/world collision checks remain enabled when this is false.
+check_self_collisions: true
+floor:
+  id: teleop_floor
+  frame: base_link
+  # User measured: floor surface is 1 cm below the robot base.
+  top_z: -0.01
+  center_xy: [0.0, 0.0]
+  # Box extends downward from top_z; spans more than the UR3 workspace.
+  size: [4.0, 4.0, 2.0]
+  # Only fixed mounting links may contact the supporting surface.
+  mount_links: [base_link, base_link_inertia]
+scene_margin: 0.005
+self_margin: 0.003
+# Maximum spacing of samples on actual -> commanded Q path (radians).
+path_step: 0.02

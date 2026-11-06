@@ -10,6 +10,7 @@ from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
 from trajectory_msgs.msg import JointTrajectory
 from sensor_msgs.msg import JointState
+from moveit_msgs.srv import GetStateValidity
 from std_msgs.msg import Bool, String, Int8
 from teleop_core.rtde_diagnostics import json_safe
 from teleop_core.pose_control import Pose
@@ -25,13 +26,15 @@ class UrRtdeBridge(Node):
                   'feedback_timeout':.25,'trajectory_timeout':.1,'max_joint_tracking_error':.15,
                   'lookahead_time':.1,'gain':300.,'robot_frame':'base','publish_diagnostics':False,
                   'lead_soft_start':.06,'lead_soft_limit':.10,
+                  'collision_check_timeout':.02,
                   'joint_velocity_limits':[1.,1.,1.,1.2,1.2,1.2],
                   'joint_continuous':[False,False,False,False,False,True],
                   'joint_lower_limits':[-2*math.pi]*6,'joint_upper_limits':[2*math.pi]*6}
         for k,v in defaults.items(): self.declare_parameter(k,v)
         self.cfg={k:self.get_parameter(k).value for k in defaults}
         if not self.cfg['robot_ip']: raise ValueError('robot_ip required')
-        for k in ['frequency','command_timeout','feedback_timeout','trajectory_timeout','max_joint_tracking_error']:
+        for k in ['frequency','command_timeout','feedback_timeout','trajectory_timeout','max_joint_tracking_error',
+                  'collision_check_timeout']:
             if not math.isfinite(self.cfg[k]) or self.cfg[k]<=0: raise ValueError(k)
         if not 1<=self.cfg['frequency']<=500: raise ValueError('frequency outside 1..500')
         if not .03<=self.cfg['lookahead_time']<=.2 or not 100<=self.cfg['gain']<=2000:
@@ -59,9 +62,30 @@ class UrRtdeBridge(Node):
         self.joint_pub=self.create_publisher(JointState,'/joint_states',1)
         self.status_pub=self.create_publisher(String,'/teleop/rtde_status',1)
         self.trace_pub=self.create_publisher(String,'/teleop/rtde_diagnostics',10)
+        self.collision_client=self.create_client(GetStateValidity,'/teleop/check_state_validity')
         self.create_timer(1/self.cfg['frequency'],self.publish_state)
         self.worker=threading.Thread(target=self.run,name='rtde-control',daemon=True)
         self.worker.start()
+
+    def check_command_path(self,actual,command):
+        # Query the guard for every outgoing reference, including preview.
+        # Fail closed; this is a recoverable command rejection, not a servoJ fault.
+        if not self.collision_client.service_is_ready():
+            raise ValueError('COLLISION_GUARD_UNAVAILABLE')
+        request=GetStateValidity.Request()
+        request.group_name='manipulator'
+        request.robot_state.joint_state.name=list(UR3_ARM_JOINTS)
+        request.robot_state.joint_state.position=list(command)
+        completed=threading.Event()
+        future=self.collision_client.call_async(request)
+        future.add_done_callback(lambda _:completed.set())
+        if not completed.wait(self.cfg['collision_check_timeout']):
+            self.collision_client.remove_pending_request(future)
+            future.cancel()
+            raise ValueError('COLLISION_GUARD_TIMEOUT')
+        response=future.result()
+        if response is None: raise ValueError('COLLISION_GUARD_NO_RESPONSE')
+        return response.valid
 
     def on_trajectory(self,msg):
         try:
@@ -155,7 +179,8 @@ class UrRtdeBridge(Node):
             session=JointServoSession(control,self.velocity_limits,self.cfg['joint_lower_limits'],
                                       self.cfg['joint_upper_limits'],self.cfg['max_joint_tracking_error'],
                                       self.cfg['lookahead_time'],self.cfg['gain'],self.cfg['joint_continuous'],
-                                      self.cfg['lead_soft_start'],self.cfg['lead_soft_limit'])
+                                      self.cfg['lead_soft_start'],self.cfg['lead_soft_limit'],
+                                      command_check=self.check_command_path)
             dt=1/self.cfg['frequency'];last_stamp=None;last_fresh=time.monotonic();last_cycle=None
             missed_cycle_limit=4*dt
             previous_timings={}

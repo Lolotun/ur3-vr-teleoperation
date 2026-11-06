@@ -16,7 +16,8 @@ import yaml
 from teleop_core.ur3_model import UR3_ARM_JOINTS
 
 
-def robot_parameters(calibration_file='', tcp_xyz=(0., 0., 0.), tcp_rpy=(0., 0., 0.)):
+def robot_parameters(calibration_file='', tcp_xyz=(0., 0., 0.), tcp_rpy=(0., 0., 0.),
+                     tcp_collision_radius=.01, check_self_collisions=True):
     """Use one model for Servo and TF, including the configured active TCP."""
     description_share = Path(get_package_share_directory('ur_description'))
     calibration = calibration_file or str(description_share / 'config/ur3/default_kinematics.yaml')
@@ -24,7 +25,11 @@ def robot_parameters(calibration_file='', tcp_xyz=(0., 0., 0.), tcp_rpy=(0., 0.,
                                   mappings={'ur_type': 'ur3', 'name': 'ur3',
                                             'kinematics_params': calibration})
     root = ET.fromstring(document.toxml())
-    ET.SubElement(root, 'link', name='teleop_tcp')
+    if not math.isfinite(tcp_collision_radius) or tcp_collision_radius <= 0:
+        raise ValueError('tcp_collision_radius must be finite and positive')
+    tcp = ET.SubElement(root, 'link', name='teleop_tcp')
+    geometry = ET.SubElement(ET.SubElement(tcp, 'collision'), 'geometry')
+    ET.SubElement(geometry, 'sphere', radius=str(tcp_collision_radius))
     joint = ET.SubElement(root, 'joint', name='teleop_tcp_joint', type='fixed')
     ET.SubElement(joint, 'parent', link='tool0')
     ET.SubElement(joint, 'child', link='teleop_tcp')
@@ -33,6 +38,15 @@ def robot_parameters(calibration_file='', tcp_xyz=(0., 0., 0.), tcp_rpy=(0., 0.,
     semantic = ET.fromstring((share / 'config/ur3_workshop.srdf').read_text())
     semantic.find('group/chain').set('tip_link', 'teleop_tcp')
     semantic.remove(semantic.find('end_effector'))  # The arm itself is not a separate gripper group.
+    ET.SubElement(semantic, 'disable_collisions', link1='teleop_tcp', link2='wrist_3_link', reason='Adjacent')
+    if not check_self_collisions:
+        for pair in list(semantic.findall('disable_collisions')):
+            semantic.remove(pair)
+        links = [link.get('name') for link in root.findall('link')]
+        for i, first in enumerate(links):
+            for second in links[i + 1:]:
+                ET.SubElement(semantic, 'disable_collisions', link1=first, link2=second,
+                              reason='SelfCollisionChecksDisabled')
     limits = yaml.safe_load((share / 'config/joint_limits.yaml').read_text())
     lower, upper, velocity, continuous = [], [], [], []
     for name in UR3_ARM_JOINTS:
@@ -67,15 +81,23 @@ def launch_nodes(context):
             raise ValueError(f'{name} must contain three finite numbers')
         return [float(x) for x in result]
 
-    model, execution_limits = robot_parameters(value('kinematics_params_file', str),
-                                               vector('tcp_xyz'), vector('tcp_rpy'))
     share = Path(get_package_share_directory('teleop_core'))
+    collision_scene = yaml.safe_load((share / 'config/collision_scene.yaml').read_text())
+    check_self_collisions = collision_scene.pop('check_self_collisions', True)
+    if not isinstance(check_self_collisions, bool):
+        raise ValueError('check_self_collisions must be a YAML boolean')
+    model, execution_limits = robot_parameters(value('kinematics_params_file', str),
+                                               vector('tcp_xyz'), vector('tcp_rpy'), value('tcp_collision_radius'),
+                                               check_self_collisions=check_self_collisions)
     servo = yaml.safe_load((share / 'config/ur3_rtde_servo.yaml').read_text())
     servo['moveit_servo']['publish_period'] = 1 / frequency
     servo['moveit_servo']['incoming_command_timeout'] = value('trajectory_timeout')
     servo['moveit_servo']['lower_singularity_threshold'] = value('lower_singularity_threshold')
     servo['moveit_servo']['hard_stop_singularity_threshold'] = value('hard_stop_singularity_threshold')
     common = {name: value(name) for name in ['frequency', 'command_timeout', 'feedback_timeout']}
+    collision_scene['floor']['top_z'] = value('floor_z')
+    collision_scene['feedback_timeout'] = value('feedback_timeout')
+    collision_scene['max_joint_lead'] = value('max_joint_tracking_error')
     launch_model = {**model,
                     'robot_description': ParameterValue(model['robot_description'], value_type=str),
                     'robot_description_semantic': ParameterValue(model['robot_description_semantic'], value_type=str)}
@@ -94,6 +116,8 @@ def launch_nodes(context):
                                                        'position_gain', 'rotation_gain']}}]),
         Node(package='moveit_servo', executable='servo_node_main', name='servo_node',
              output='screen', parameters=[launch_model, servo]),
+        Node(package='teleop_collision', executable='collision_guard', name='teleop_collision_guard',
+             output='screen', parameters=[launch_model, collision_scene]),
         Node(package='teleop_core', executable='servo_twist_enable', output='screen', parameters=[{
             'start_service': '/servo_node/start_servo', 'unpause_service': ''}]),
         Node(package='teleop_core', executable='ur_rtde_bridge', output='screen', parameters=[{
@@ -120,6 +144,7 @@ def generate_launch_description():
                 'max_joint_tracking_error': '0.15', 'lookahead_time': '0.1', 'gain': '300.0',
                 'lead_soft_start': '0.06', 'lead_soft_limit': '0.10',
                 'kinematics_params_file': '', 'tcp_xyz': '[0.0, 0.0, 0.0]', 'tcp_rpy': '[0.0, 0.0, 0.0]',
-                'lower_singularity_threshold': '17.0', 'hard_stop_singularity_threshold': '30.0'}
+                'lower_singularity_threshold': '17.0', 'hard_stop_singularity_threshold': '30.0',
+                'floor_z': '-0.01', 'tcp_collision_radius': '0.01'}
     return LaunchDescription([DeclareLaunchArgument(k, default_value=v) for k, v in defaults.items()]
                              + [OpaqueFunction(function=launch_nodes)])

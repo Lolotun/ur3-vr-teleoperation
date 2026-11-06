@@ -33,9 +33,8 @@ moveit_servo:
   leaving_singularity_threshold_multiplier: 2.0
   joint_limit_margin: 0.1
   override_velocity_scaling_factor: 0.0
-  # Enable only after validating the workcell collision geometry.
-  check_collisions: false
-  collision_check_rate: 5.0
+  check_collisions: true
+  collision_check_rate: 50.0
   self_collision_proximity_threshold: 0.01
   scene_collision_proximity_threshold: 0.02
   halt_all_joints_in_cartesian_mode: true

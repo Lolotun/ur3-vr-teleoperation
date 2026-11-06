@@ -122,6 +122,7 @@ def record(path, duration, ros_args):
 
             for topic, kind in [(TRACE_TOPIC, String), ('/teleop/rtde_status', String),
                                 ('/teleop/servo/status', Int8), ('/teleop/tracking_status', String),
+                                ('/teleop/collision_status', String),
                                 ('/teleop/servo/active', Bool), ('/teleop/servo/joint_trajectory', JointTrajectory),
                                 ('/teleop/servo/twist', TwistStamped)]:
                 subscriptions.append(node.create_subscription(kind, topic, callback(topic), 1000))
