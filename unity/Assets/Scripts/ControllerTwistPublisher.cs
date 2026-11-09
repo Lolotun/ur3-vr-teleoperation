@@ -43,6 +43,50 @@ public class ControllerTwistPublisher : MonoBehaviour
     public bool useGripButtonForGripper = true;
     public float gripperVisualCloseDistance = 0.012f;
     public float gripperVisualSpeed = 10f;
+    [Header("Dataset recording")]
+    [Tooltip("Right B sends a recording toggle event to vr-dagger.")]
+    public bool publishDatasetButton = true;
+    private const string DatasetToggleTopic = "/vr/dataset/toggle";
+    private const string DatasetStatusTopic = "/dataset/recording_status";
+    private readonly ButtonPressEdge datasetButton = new ButtonPressEdge();
+    private readonly string datasetSession = System.Guid.NewGuid().ToString("N");
+    private long datasetSequence;
+    private string lastDatasetStatus;
+
+    [System.Serializable]
+    private class DatasetToggle
+    {
+        public int schema = 1;
+        public string session;
+        public long sequence;
+        public long stamp_ns;
+    }
+
+    [System.Serializable]
+    private class DatasetStatus
+    {
+        public string state = "";
+        public string episode = "";
+        public bool ready = false;
+        public string error = "";
+    }
+
+    private void OnDatasetStatus(StringMsg status)
+    {
+        try
+        {
+            var value = JsonUtility.FromJson<DatasetStatus>(status.data);
+            if (value == null) return;
+            string summary = $"{value.state} {value.episode} ready={value.ready} {value.error}";
+            if (summary == lastDatasetStatus) return;
+            lastDatasetStatus = summary;
+            Debug.Log("[Dataset] " + summary, this);
+        }
+        catch (System.ArgumentException exception)
+        {
+            Debug.LogWarning("[Dataset] Invalid status: " + exception.Message, this);
+        }
+    }
 
     private InputDevice rightHandDevice;
     private ROSConnection ros;
@@ -108,6 +152,8 @@ public class ControllerTwistPublisher : MonoBehaviour
         };
 
         ros.RegisterPublisher<TwistStampedMsg>(topic);
+        ros.RegisterPublisher<StringMsg>(DatasetToggleTopic);
+        ros.Subscribe<StringMsg>(DatasetStatusTopic, OnDatasetStatus);
         if (publishGripperCommands)
         {
             gripperMsg = new StringMsg();
@@ -120,6 +166,7 @@ public class ControllerTwistPublisher : MonoBehaviour
 
     private void Update()
     {
+        PublishDatasetButton();
         if (calibrationBlocked) return;
         PublishGripperCommandIfChanged();
         UpdateGripperVisual();
@@ -158,6 +205,36 @@ public class ControllerTwistPublisher : MonoBehaviour
         }
 
         wasTriggerPressed = triggerPressed;
+    }
+
+    private void PublishDatasetButton()
+    {
+        if (!rightHandDevice.isValid)
+            rightHandDevice = InputDevices.GetDeviceAtXRNode(XRNode.RightHand);
+        bool pressed = false;
+        bool available = publishDatasetButton && ros != null
+            && ros.HasConnectionThread && !ros.HasConnectionError && rightHandDevice.isValid
+            && rightHandDevice.TryGetFeatureValue(CommonUsages.isTracked, out bool tracked) && tracked
+            && rightHandDevice.TryGetFeatureValue(CommonUsages.secondaryButton, out pressed);
+        if (!datasetButton.Update(available, pressed)) return;
+        var message = new DatasetToggle
+        {
+            session = datasetSession,
+            sequence = ++datasetSequence,
+            stamp_ns = (System.DateTime.UtcNow.Ticks - 621355968000000000L) * 100L,
+        };
+        ros.Publish(DatasetToggleTopic, new StringMsg(JsonUtility.ToJson(message)));
+        Debug.Log("[Dataset] Right B: recording toggle sent", this);
+    }
+
+    private void OnDisable()
+    {
+        datasetButton.Update(false, false);
+    }
+
+    private void OnDestroy()
+    {
+        if (ros != null) ros.Unsubscribe(DatasetStatusTopic);
     }
 
     private bool IsRightTriggerPressed()
