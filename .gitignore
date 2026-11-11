@@ -14,6 +14,14 @@ __pycache__/
 **/ros2_ws/log/
 *.egg-info/
 
+# Test and static analysis caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
 # Unity has its own ignore file, retained in unity/.gitignore
 *.slnx
 
@@ -22,6 +30,7 @@ __pycache__/
 /unity/Packages/com.meta.xr.sdk.core.meta
 
 # Generated artifacts belong outside source control
+/tmp/
 /dist/
 /data/
 /recordings/
