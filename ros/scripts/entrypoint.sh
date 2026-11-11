@@ -25,6 +25,14 @@ case "${1:-wifi_speedl}" in
       tcp_port:=${ROS_TCP_PORT:-10000} \
       enable_motion:=${RTDE_ENABLE_MOTION:-false} \
       enable_gripper:=${RTDE_ENABLE_GRIPPER:-false} \
+      enable_gripper_feedback:=${RTDE_ENABLE_GRIPPER_FEEDBACK:-true} \
+      control_mode:=${TELEOP_CONTROL_MODE:-STOP} \
+      policy_max_linear_speed:=${POLICY_MAX_LINEAR_SPEED:-0.020} \
+      policy_max_angular_speed:=${POLICY_MAX_ANGULAR_SPEED:-0.12} \
+      policy_target_distance:=${POLICY_TARGET_DISTANCE:-0.03} \
+      policy_target_rotation:=${POLICY_TARGET_ROTATION:-0.17453292519943295} \
+      policy_max_distance:=${POLICY_MAX_DISTANCE:-0.20} \
+      policy_max_rotation:=${POLICY_MAX_ROTATION:-0.5} \
       gripper_port:=${GRIPPER_PORT:-63352} \
       gripper_force:=${GRIPPER_FORCE:-20} \
       frequency:=${RTDE_FREQUENCY:-125.0} \

@@ -17,6 +17,7 @@ class PoseTrackingController(Node):
         defaults = {'frequency': 125., 'command_timeout': .25, 'feedback_timeout': .25,
                     'position_gain': 2., 'rotation_gain': 2., 'max_linear_speed': .02,
                     'max_angular_speed': .12, 'robot_frame': 'base'}
+        defaults.update(policy_max_linear_speed=.020, policy_max_angular_speed=.12)
         for key, value in defaults.items():
             self.declare_parameter(key, value)
         self.cfg = {key: self.get_parameter(key).value for key in defaults}
@@ -33,6 +34,8 @@ class PoseTrackingController(Node):
         self.faulted = True
         self.released = False
         self.last_status = ''
+        self.control_mode = 'STOP'
+        self.create_subscription(String, '/teleop/control_mode', self.on_mode, 1)
         self.twist_pub = self.create_publisher(TwistStamped, '/teleop/servo/twist', 1)
         self.active_pub = self.create_publisher(Bool, '/teleop/servo/active', 1)
         self.status_pub = self.create_publisher(String, '/teleop/tracking_status', 1)
@@ -52,6 +55,10 @@ class PoseTrackingController(Node):
             self.arm_time = self.active_time
             self.faulted = False
             self.released = False
+
+    def on_mode(self, msg):
+        if msg.data in ('STOP', 'VR', 'POLICY'):
+            self.control_mode = msg.data
 
     def on_pose(self, msg, name, timeout):
         try:
@@ -98,9 +105,13 @@ class PoseTrackingController(Node):
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = self.cfg['robot_frame']
         if enabled:
+            linear_limit, angular_limit = self.cfg['max_linear_speed'], self.cfg['max_angular_speed']
+            if self.control_mode == 'POLICY':
+                linear_limit = min(linear_limit, self.cfg['policy_max_linear_speed'])
+                angular_limit = min(angular_limit, self.cfg['policy_max_angular_speed'])
             linear, angular = tracking_twist(
                 self.actual, self.target, self.cfg['position_gain'], self.cfg['rotation_gain'],
-                self.cfg['max_linear_speed'], self.cfg['max_angular_speed'])
+                linear_limit, angular_limit)
             msg.twist.linear.x, msg.twist.linear.y, msg.twist.linear.z = linear
             msg.twist.angular.x, msg.twist.angular.y, msg.twist.angular.z = angular
         self.twist_pub.publish(msg)

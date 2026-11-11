@@ -110,10 +110,17 @@ def launch_nodes(context):
              output='screen'),
         Node(package='teleop_core', executable='relative_pose_controller', output='screen', parameters=[{
             name: value(name) for name in ['position_scale', 'mapping_yaw_deg', 'max_displacement',
-                                          'max_rotation', 'feedback_timeout']}]),
+                                          'max_rotation', 'feedback_timeout']}],
+             remappings=[('/teleop/target_pose', '/vr/target_pose'), ('/teleop/active', '/vr/target_active')]),
+        Node(package='teleop_core', executable='control_mux', output='screen', parameters=[{
+            'initial_mode': value('control_mode', str), 'timeout': value('command_timeout'),
+            'feedback_timeout': value('feedback_timeout'),
+            **{name: value(name) for name in ['policy_target_distance', 'policy_target_rotation',
+                                              'policy_max_distance', 'policy_max_rotation']}}]),
         Node(package='teleop_core', executable='pose_tracking_controller', output='screen', parameters=[{
             **common, **{name: value(name) for name in ['max_linear_speed', 'max_angular_speed',
-                                                       'position_gain', 'rotation_gain']}}]),
+                                                       'position_gain', 'rotation_gain',
+                                                       'policy_max_linear_speed', 'policy_max_angular_speed']}}]),
         Node(package='moveit_servo', executable='servo_node_main', name='servo_node',
              output='screen', parameters=[launch_model, servo]),
         Node(package='teleop_collision', executable='collision_guard', name='teleop_collision_guard',
@@ -129,16 +136,23 @@ def launch_nodes(context):
         Node(package='teleop_core', executable='robotiq_gripper_bridge',
              condition=IfCondition(LaunchConfiguration('enable_gripper')), output='screen', parameters=[{
                  'robot_ip': value('robot_ip', str), 'robot_port': value('gripper_port', int),
-                 'force': value('gripper_force', int)}]),
+                 'force': value('gripper_force', int)}],
+             remappings=[('/team_1/gripper_command', '/teleop/gripper_command')]),
+        Node(package='teleop_core', executable='robotiq_feedback', output='screen',
+             condition=IfCondition(LaunchConfiguration('enable_gripper_feedback')), parameters=[{
+                 'robot_ip': value('robot_ip', str), 'robot_port': value('gripper_port', int)}]),
     ]
 
 
 def generate_launch_description():
-    defaults = {'robot_ip': '', 'tcp_port': '10000', 'start_endpoint': 'true',
-                'enable_motion': 'false', 'enable_gripper': 'false', 'gripper_port': '63352',
+    defaults = {'robot_ip': '', 'tcp_port': '10000', 'start_endpoint': 'true', 'control_mode': 'STOP',
+                'enable_motion': 'false', 'enable_gripper': 'false', 'enable_gripper_feedback': 'true', 'gripper_port': '63352',
                 'gripper_force': '20', 'frequency': '125.0', 'position_scale': '1.0',
                 'mapping_yaw_deg': '180.0', 'max_displacement': '0.25', 'max_rotation': '1.0',
                 'max_linear_speed': '0.020', 'max_angular_speed': '0.12',
+                'policy_max_linear_speed': '0.020', 'policy_max_angular_speed': '0.12',
+                'policy_target_distance': '0.03', 'policy_target_rotation': '0.17453292519943295',
+                'policy_max_distance': '0.20', 'policy_max_rotation': '0.5',
                 'position_gain': '2.0', 'rotation_gain': '2.0',
                 'command_timeout': '0.25', 'feedback_timeout': '0.25', 'trajectory_timeout': '0.1',
                 'max_joint_tracking_error': '0.15', 'lookahead_time': '0.1', 'gain': '300.0',
